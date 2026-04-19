@@ -1,0 +1,411 @@
+use std::path::Path;
+use std::process::ExitCode;
+
+use crate::config::Config;
+use crate::db::{Database, HistoryRow, expand_home, now_secs};
+use crate::index;
+use crate::init;
+use crate::picker;
+use crate::score::{Scored, Scorer};
+use crate::{doctor, import};
+
+pub const HELP: &str = r#"fuzzy-cd — smart directory jump
+
+Usage:
+    fuzzy-cd <query>                  Jump to best match (prints path)
+    fuzzy-cd p|pick [query]           Same; empty query opens picker
+    fuzzy-cd add <path>               Record a visit
+    fuzzy-cd rm <path>                Remove from history
+    fuzzy-cd book <alias> [path]      Set/resolve bookmark
+    fuzzy-cd book rm <alias>          Remove bookmark
+    fuzzy-cd book list                List bookmarks
+    fuzzy-cd history [n]              Top n by visits (default 20)
+    fuzzy-cd recent [n]               Last n visited (default 20)
+    fuzzy-cd top                      Top 10 by visits
+    fuzzy-cd import fasd <file>       Import fasd data
+    fuzzy-cd import zsh <file>        Import zsh history
+    fuzzy-cd prune                    Remove stale (deleted) paths
+    fuzzy-cd clear                    Wipe history
+    fuzzy-cd stats                    DB stats
+    fuzzy-cd reindex                  Rebuild filesystem index
+    fuzzy-cd doctor                   Diagnose setup
+    fuzzy-cd init <bash|zsh|fish>     Emit shell integration
+    fuzzy-cd --help                   This help
+"#;
+
+pub fn run(args: Vec<String>) -> ExitCode {
+    // Fast-path: `init` needs no DB.
+    if args.len() >= 2 && args[1] == "init" {
+        return cmd_init(&args);
+    }
+    if matches!(
+        args.get(1).map(String::as_str),
+        Some("--help" | "-h" | "help")
+    ) {
+        print!("{}", HELP);
+        return ExitCode::SUCCESS;
+    }
+    if args.len() == 1 {
+        // bare invocation → picker
+        return run_picker_and_print("");
+    }
+
+    let db = match Database::open() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("db open failed: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+    let cfg = Config::load();
+
+    match args[1].as_str() {
+        "p" | "pick" => {
+            // Strip `--` separator if present
+            let rest: Vec<&str> = args[2..]
+                .iter()
+                .map(String::as_str)
+                .filter(|s| *s != "--")
+                .collect();
+            let query = rest.join(" ");
+            if query.is_empty() {
+                return run_picker_and_print("");
+            }
+            match find_best(&db, &cfg, &query) {
+                Some(path) => {
+                    println!("{}", path);
+                    let _ = db.record_visit(&path);
+                    ExitCode::SUCCESS
+                }
+                None => ExitCode::from(1),
+            }
+        }
+        "add" => {
+            let Some(arg) = positional(&args, 2) else {
+                eprintln!("Usage: fuzzy-cd add <path>");
+                return ExitCode::from(2);
+            };
+            let path = expand_home(arg);
+            if !path.is_dir() {
+                eprintln!("not a directory: {}", path.display());
+                return ExitCode::from(1);
+            }
+            let _ = db.record_visit(&path.to_string_lossy());
+            ExitCode::SUCCESS
+        }
+        "rm" => {
+            let Some(arg) = positional(&args, 2) else {
+                eprintln!("Usage: fuzzy-cd rm <path>");
+                return ExitCode::from(2);
+            };
+            let path = expand_home(arg);
+            let _ = db.forget(&path.to_string_lossy());
+            ExitCode::SUCCESS
+        }
+        "book" | "bookmark" => cmd_bookmark(&db, &args[2..]),
+        "history" => {
+            let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let rows = db.top(n).unwrap_or_default();
+            print_rows(&rows);
+            ExitCode::SUCCESS
+        }
+        "top" => {
+            let rows = db.top(10).unwrap_or_default();
+            print_rows(&rows);
+            ExitCode::SUCCESS
+        }
+        "recent" => {
+            let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let rows = db.recent(n).unwrap_or_default();
+            print_rows(&rows);
+            ExitCode::SUCCESS
+        }
+        "import" => {
+            if args.len() < 4 {
+                eprintln!("Usage: fuzzy-cd import <fasd|zsh> <file>");
+                return ExitCode::from(2);
+            }
+            let source = args[2].as_str();
+            let file = Path::new(&args[3]);
+            let result = match source {
+                "fasd" => import::import_fasd(&db, file),
+                "zsh" => import::import_zsh(&db, file),
+                _ => {
+                    eprintln!("unknown source: {}", source);
+                    return ExitCode::from(2);
+                }
+            };
+            match result {
+                Ok(stats) => {
+                    println!("imported {}, skipped {}", stats.imported, stats.skipped);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("import failed: {}", e);
+                    ExitCode::from(1)
+                }
+            }
+        }
+        "prune" => {
+            let removed = db.prune_stale().unwrap_or(0);
+            println!(
+                "pruned {} stale entr{}",
+                removed,
+                if removed == 1 { "y" } else { "ies" }
+            );
+            ExitCode::SUCCESS
+        }
+        "clear" => {
+            let _ = db.clear_history();
+            println!("history cleared");
+            ExitCode::SUCCESS
+        }
+        "stats" => match db.counts() {
+            Ok(c) => {
+                println!(
+                    "paths: {}\nvisits: {}\nbookmarks: {}\nindexed dirs: {}\ntop: {}",
+                    c.total,
+                    c.total_visits,
+                    c.bookmarks,
+                    c.indexed,
+                    c.top_path.unwrap_or_else(|| "(none)".into())
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("stats failed: {}", e);
+                ExitCode::from(1)
+            }
+        },
+        "reindex" | "--reindex" | "-r" => {
+            let stats = index::reindex(&db, &cfg);
+            println!(
+                "indexed {} dirs ({} scanned)",
+                stats.inserted, stats.scanned
+            );
+            ExitCode::SUCCESS
+        }
+        "doctor" => {
+            let r = doctor::run(&db);
+            for line in &r.lines {
+                println!("{}", line);
+            }
+            if r.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        _ => {
+            // treat unrecognized first arg as a query
+            let query = args[1..].join(" ");
+            match find_best(&db, &cfg, &query) {
+                Some(path) => {
+                    println!("{}", path);
+                    let _ = db.record_visit(&path);
+                    ExitCode::SUCCESS
+                }
+                None => ExitCode::from(1),
+            }
+        }
+    }
+}
+
+fn positional(args: &[String], idx: usize) -> Option<&str> {
+    let a = args.get(idx)?;
+    if a == "--" {
+        args.get(idx + 1).map(String::as_str)
+    } else {
+        Some(a.as_str())
+    }
+}
+
+fn cmd_init(args: &[String]) -> ExitCode {
+    let shell = args.get(2).map(String::as_str).unwrap_or("");
+    match init::script_for(shell) {
+        Some(s) => {
+            print!("{}", s);
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("Usage: fuzzy-cd init <bash|zsh|fish>");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_bookmark(db: &Database, args: &[String]) -> ExitCode {
+    if args.is_empty() || args[0] == "list" {
+        match db.bookmarks() {
+            Ok(bms) => {
+                for (alias, path) in bms {
+                    println!("{:20}  {}", alias, path);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(_) => ExitCode::from(1),
+        }
+    } else if args[0] == "rm" {
+        if args.len() < 2 {
+            eprintln!("Usage: fuzzy-cd book rm <alias>");
+            return ExitCode::from(2);
+        }
+        let _ = db.remove_bookmark(&args[1]);
+        ExitCode::SUCCESS
+    } else {
+        let alias = &args[0];
+        if args.len() > 1 {
+            let path = expand_home(&args[1]);
+            if !path.is_dir() {
+                eprintln!("not a directory: {}", path.display());
+                return ExitCode::from(1);
+            }
+            let _ = db.set_bookmark(alias, &path.to_string_lossy());
+            ExitCode::SUCCESS
+        } else {
+            match db.bookmark_exact(alias) {
+                Ok(Some(p)) => {
+                    println!("{}", p);
+                    ExitCode::SUCCESS
+                }
+                _ => ExitCode::from(1),
+            }
+        }
+    }
+}
+
+fn run_picker_and_print(query: &str) -> ExitCode {
+    let db = match Database::open() {
+        Ok(d) => d,
+        Err(_) => return ExitCode::from(2),
+    };
+    match picker::run(&db, query) {
+        Ok(Some(path)) => {
+            println!("{}", path);
+            let _ = db.record_visit(&path);
+            ExitCode::SUCCESS
+        }
+        _ => ExitCode::from(1),
+    }
+}
+
+pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
+    // exact bookmark alias short-circuits
+    if let Ok(Some(p)) = db.bookmark_exact(query)
+        && Path::new(&p).is_dir()
+    {
+        return Some(p);
+    }
+
+    let scorer = Scorer::new(now_secs());
+    let mut cands: Vec<Scored> = Vec::new();
+
+    if let Ok(bms) = db.bookmarks() {
+        for (alias, path) in bms {
+            if let Some(s) = scorer.score_bookmark(&alias, &path, query)
+                && Path::new(&s.path).is_dir()
+            {
+                cands.push(s);
+            }
+        }
+    }
+
+    if let Ok(rows) = db.history_rows() {
+        for r in rows {
+            if let Some(s) = scorer.score_history(&r, query)
+                && Path::new(&s.path).is_dir()
+            {
+                cands.push(s);
+            }
+        }
+    }
+
+    // Fallback to filesystem index if nothing strong found
+    let best_history = cands.iter().map(|c| c.score).max().unwrap_or(0);
+    if best_history < cfg.min_score * 2
+        && let Ok(paths) = db.index_rows()
+    {
+        for p in paths {
+            if let Some(s) = scorer.score_indexed(&p, query)
+                && Path::new(&s.path).is_dir()
+            {
+                cands.push(s);
+            }
+        }
+    }
+
+    cands.sort_by_key(|c| std::cmp::Reverse(c.score));
+    cands.dedup_by(|a, b| a.path == b.path);
+    cands
+        .into_iter()
+        .find(|c| c.score >= cfg.min_score)
+        .map(|c| c.path)
+}
+
+#[allow(dead_code)]
+fn row_display(r: &HistoryRow) -> String {
+    format!("{:4} visits   {}", r.visits, r.path)
+}
+
+fn print_rows(rows: &[HistoryRow]) {
+    for r in rows {
+        println!("{:4} visits   {}", r.visits, r.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_best_respects_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("my-project");
+        std::fs::create_dir(&real).unwrap();
+
+        let db = Database::in_memory().unwrap();
+        db.record_visit(&real.to_string_lossy()).unwrap();
+        let cfg = Config::default();
+
+        assert_eq!(
+            find_best(&db, &cfg, "proj").as_deref(),
+            Some(real.to_str().unwrap())
+        );
+        // total garbage query → no match
+        assert!(find_best(&db, &cfg, "xxxyyyzzz").is_none());
+    }
+
+    #[test]
+    fn find_best_filters_deleted_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("keep");
+        let gone = tmp.path().join("gone");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::create_dir(&gone).unwrap();
+        let db = Database::in_memory().unwrap();
+        db.record_visit(&real.to_string_lossy()).unwrap();
+        db.record_visit(&gone.to_string_lossy()).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        let cfg = Config::default();
+        let best = find_best(&db, &cfg, "gone");
+        assert!(
+            best.is_none(),
+            "must not return deleted dir, got {:?}",
+            best
+        );
+    }
+
+    #[test]
+    fn bookmark_exact_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("bm");
+        std::fs::create_dir(&real).unwrap();
+        let db = Database::in_memory().unwrap();
+        db.set_bookmark("xyz", &real.to_string_lossy()).unwrap();
+        let cfg = Config::default();
+        assert_eq!(
+            find_best(&db, &cfg, "xyz").as_deref(),
+            Some(real.to_str().unwrap())
+        );
+    }
+}
