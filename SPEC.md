@@ -15,7 +15,8 @@ Formerly shipped as `fuzzy-cd`; renamed to `hop` in v0.4.
 | `hop p|pick [query]`            | Same; empty query opens picker.         |
 | `hop` (bare)                    | Interactive picker.                     |
 | `hop add <path>`                | Record a visit.                         |
-| `hop rm <path>`                 | Drop from history.                      |
+| `hop rm <path>`                 | Drop from history (exact path).       |
+| `hop forget|zap <query>`        | Fuzzy-find and remove from history.  |
 | `hop book <alias> [path]`       | Set or resolve bookmark.                |
 | `hop book rm <alias>`           | Delete bookmark.                        |
 | `hop book list`                 | List bookmarks.                         |
