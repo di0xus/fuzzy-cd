@@ -7,17 +7,17 @@ pub fn script_for(shell: &str) -> Option<&'static str> {
     }
 }
 
-const BASH: &str = r#"# fuzzy-cd bash integration
-_fuzzy_cd_chpwd() { command fuzzy-cd add -- "$PWD" >/dev/null 2>&1; }
+const BASH: &str = r#"# hop bash integration
+__hop_chpwd() { command hop add -- "$PWD" >/dev/null 2>&1; }
 case ":${PROMPT_COMMAND:-}:" in
-  *:_fuzzy_cd_chpwd:*) ;;
-  *) PROMPT_COMMAND="_fuzzy_cd_chpwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+  *:__hop_chpwd:*) ;;
+  *) PROMPT_COMMAND="__hop_chpwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
 esac
 
-fcd() {
+__hop_cd() {
     if [ $# -eq 0 ]; then
         local dir
-        dir=$(command fuzzy-cd pick)
+        dir=$(command hop pick)
         [ -n "$dir" ] && builtin cd -- "$dir"
         return
     fi
@@ -29,25 +29,25 @@ fcd() {
         return
     fi
     local dir
-    dir=$(command fuzzy-cd p -- "$@")
+    dir=$(command hop p -- "$@")
     if [ -n "$dir" ]; then
         builtin cd -- "$dir"
     else
         builtin cd -- "$@"
     fi
 }
-alias cd='fcd'
+alias cd='__hop_cd'
 "#;
 
-const ZSH: &str = r#"# fuzzy-cd zsh integration
+const ZSH: &str = r#"# hop zsh integration
 autoload -U add-zsh-hook
-_fuzzy_cd_chpwd() { command fuzzy-cd add -- "$PWD" >/dev/null 2>&1 }
-add-zsh-hook chpwd _fuzzy_cd_chpwd
+__hop_chpwd() { command hop add -- "$PWD" >/dev/null 2>&1 }
+add-zsh-hook chpwd __hop_chpwd
 
-fcd() {
+__hop_cd() {
     if (( $# == 0 )); then
         local dir
-        dir=$(command fuzzy-cd pick)
+        dir=$(command hop pick)
         [[ -n "$dir" ]] && builtin cd -- "$dir"
         return
     fi
@@ -59,24 +59,24 @@ fcd() {
         return
     fi
     local dir
-    dir=$(command fuzzy-cd p -- "$@")
+    dir=$(command hop p -- "$@")
     if [[ -n "$dir" ]]; then
         builtin cd -- "$dir"
     else
         builtin cd -- "$@"
     fi
 }
-alias cd='fcd'
+alias cd='__hop_cd'
 "#;
 
-const FISH: &str = r#"# fuzzy-cd fish integration
-function __fuzzy_cd_chpwd --on-variable PWD
-    command fuzzy-cd add -- "$PWD" >/dev/null 2>&1
+const FISH: &str = r#"# hop fish integration
+function __hop_chpwd --on-variable PWD
+    command hop add -- "$PWD" >/dev/null 2>&1
 end
 
-function fcd
+function __hop_cd
     if test (count $argv) -eq 0
-        set -l dir (command fuzzy-cd pick)
+        set -l dir (command hop pick)
         if test -n "$dir"
             builtin cd -- "$dir"
         end
@@ -91,14 +91,14 @@ function fcd
         builtin cd -- $argv
         return
     end
-    set -l dir (command fuzzy-cd p -- $argv)
+    set -l dir (command hop p -- $argv)
     if test -n "$dir"
         builtin cd -- "$dir"
     else
         builtin cd -- $argv
     end
 end
-alias cd=fcd
+alias cd=__hop_cd
 "#;
 
 #[cfg(test)]
@@ -114,9 +114,12 @@ mod tests {
     }
 
     #[test]
-    fn each_script_defines_fcd() {
+    fn each_script_calls_hop_binary() {
         for shell in ["bash", "zsh", "fish"] {
-            assert!(script_for(shell).unwrap().contains("fcd"));
+            let s = script_for(shell).unwrap();
+            assert!(s.contains("command hop"), "{shell} missing binary call");
+            assert!(s.contains("__hop_cd"), "{shell} missing cd wrapper");
+            assert!(!s.contains("fuzzy-cd"), "{shell} still references old name");
         }
     }
 }
