@@ -15,7 +15,8 @@ Usage:
     hop <query>                  Jump to best match (prints path)
     hop p|pick [query]           Same; empty query opens picker
     hop add <path>               Record a visit
-    hop rm <path>                Remove from history
+    hop rm <path>                Remove from history (exact path)
+    hop forget|zap <query>       Fuzzy-find and remove from history
     hop book <alias> [path]      Set/resolve bookmark
     hop book rm <alias>          Remove bookmark
     hop book list                List bookmarks
@@ -99,8 +100,35 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 return ExitCode::from(2);
             };
             let path = expand_home(arg);
-            let _ = db.forget(&path.to_string_lossy());
+            let removed = db.forget(&path.to_string_lossy()).unwrap_or(0);
+            if removed > 0 {
+                println!("removed: {}", path.display());
+            } else {
+                println!("not found in history: {}", path.display());
+            }
             ExitCode::SUCCESS
+        }
+        "forget" | "zap" => {
+            let query = args[2..].join(" ");
+            if query.is_empty() {
+                eprintln!("Usage: hop forget <query>");
+                return ExitCode::from(2);
+            }
+            match find_best(&db, &cfg, &query) {
+                Some(path) => {
+                    let removed = db.forget(&path).unwrap_or(0);
+                    if removed > 0 {
+                        println!("forgot: {}", path);
+                    } else {
+                        println!("not found in history: {}", path);
+                    }
+                    ExitCode::SUCCESS
+                }
+                None => {
+                    eprintln!("no match for: {}", query);
+                    ExitCode::from(1)
+                }
+            }
         }
         "book" | "bookmark" => cmd_bookmark(&db, &args[2..]),
         "history" => {
