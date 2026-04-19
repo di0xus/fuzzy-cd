@@ -1,135 +1,109 @@
 # fuzzy-cd — SPEC.md
 
-## Concept & Vision
+## Concept
 
-`fuzzy-cd` is a lightweight CLI tool that makes navigating directories feel like searching with spotlight. Instead of typing full paths or remembering where things live, you type fragments and it fuzzy-matches your history and filesystem. It maintains a visit frequency database so your most-used directories bubble to the top. The shell integration feels native — `fcd myproj` reads like `cd` but with intelligence behind it.
+A fast `cd` replacement that fuzzy-matches directory history, bookmarks, and
+an optional filesystem index. Sub-10 ms cold-lookup on a 10 k-row DB.
 
-**Feel:** Fast (sub-50ms response), quiet (minimal output), reliable. The kind of tool a developer reaches for every day without thinking.
+## Surfaces
 
-## Design Language
+| Command                              | Behavior                                            |
+| ------------------------------------ | --------------------------------------------------- |
+| `fuzzy-cd <query>`                   | Prints best match path; exit 1 if no match.        |
+| `fuzzy-cd p|pick [query]`            | Same; empty query opens picker.                    |
+| `fuzzy-cd` (bare)                    | Interactive picker.                                |
+| `fuzzy-cd add <path>`                | Record a visit.                                    |
+| `fuzzy-cd rm <path>`                 | Drop from history.                                 |
+| `fuzzy-cd book <alias> [path]`       | Set or resolve bookmark.                           |
+| `fuzzy-cd book rm <alias>`           | Delete bookmark.                                   |
+| `fuzzy-cd book list`                 | List bookmarks.                                    |
+| `fuzzy-cd history [n]`               | Top n by visits (default 20).                      |
+| `fuzzy-cd recent [n]`                | Last n visited.                                    |
+| `fuzzy-cd top`                       | Top 10.                                            |
+| `fuzzy-cd import fasd|zsh <file>`    | Import from another tool.                          |
+| `fuzzy-cd prune`                     | Remove stale paths (deleted dirs).                |
+| `fuzzy-cd clear`                     | Wipe history.                                      |
+| `fuzzy-cd stats`                     | DB counts.                                         |
+| `fuzzy-cd reindex`                   | Rebuild filesystem index.                          |
+| `fuzzy-cd doctor`                    | Diagnose DB + shell hook + stale entries.         |
+| `fuzzy-cd init <bash|zsh|fish>`      | Emit shell integration.                           |
 
-- **CLI output:** One-line matches with bold highlighted match segments, no tables or ASCII art
-- **Color:** Terminal-native colors — bold for the matched substring, dim for the rest of the path
-- **Sound:** None
-- **Completion:** Interactive fuzzy search via fzf-style filtering as user types
-- **Error messages:** Short, human-readable: "No matches for: foo"
+## Scoring
 
-## Core Features
+`score = fuzzy_match + visit_boost + recency + git_bonus + basename_bonus +
+shortness_bonus`
 
-### 1. Interactive Fuzzy Search (`fcd`)
+- fuzzy: SkimV2 `fuzzy_indices` (smart-case).
+- visit_boost: `min(5, sqrt(visits)) * 20`.
+- recency: {today: 45, week: 30, month: 15, older: 7.5}.
+- git_bonus: +30 if `.git` exists (cached per visit).
+- basename_bonus: +40 when query substring hits folder name.
+- shortness: `max(1, 10/depth) * 5`.
+- bookmarks: `fuzzy × 3 + 100`; exact alias short-circuits.
+- index fallback: `fuzzy/2 + shortness*5`, only consulted when best
+  history/bookmark candidate < `2 * min_score`.
+- `min_score` gate rejects weak matches → exit 1.
 
-- Runs interactively in the terminal using readline/fzf-style filtering
-- User types a query, matches appear in real-time
-- Shows top 10 matches, sorted by visit frequency + recency
-- Enter selects and prints the chosen path to stdout (for shell integration)
-- Esc or Ctrl+C cancels and prints nothing
+## Storage
 
-**Matching logic:**
-- Fuzzy match: `sr` matches `~/src`, `~/Site Web Perso`, `~/Shutter Encoder`
-- Score = frequency × recency × fuzzy match score
-- Case-insensitive by default
+SQLite at `$XDG_DATA_HOME/fuzzy-cd/fuzzy-cd.db` (or macOS
+`~/Library/Application Support/fuzzy-cd/`), WAL mode, `synchronous=NORMAL`.
+Schema versioned via `meta.schema_version`; `Database::migrate` runs on open.
 
-### 2. Visit History
+**Tables**
+- `history(path UNIQUE, basename, visits, last_visited, created_at, is_git_repo)`
+- `bookmarks(alias UNIQUE, path, created_at)`
+- `dir_index(path UNIQUE, basename, parent, indexed_at)`
+- `meta(key PRIMARY KEY, value)`
 
-- SQLite database at `~/.fuzzy-cd/history.db`
-- Schema: `paths(id INTEGER PRIMARY KEY, path TEXT UNIQUE, visits INTEGER, last_visited REAL)`
-- Every successful `cd` integration increments visit count and updates timestamp
-- `fcd --clear-history` wipes the database
+## Shell integration
 
-### 3. Shell Integration
+`fuzzy-cd init <shell>` emits:
 
-Adds to `.zshrc` (or `.bashrc`):
-```bash
-fcd() {
-  local dir
-  dir=$(fuzzy-cd pick "$1")
-  [ -n "$dir" ] && cd "$dir"
-}
-alias cd='fcd'
+1. A `chpwd` hook → records every successful `cd` to history.
+2. A `fcd` function that short-circuits on `-`, `..`, `.`, `~`, `~/`,
+   absolute paths, and existing directories before falling back to fuzzy.
+3. `alias cd=fcd`.
+
+## Config
+
+Optional `config.toml`, tiny purpose-built parser:
+
+```toml
+index_roots = ["~/code"]
+skip_dirs   = ["node_modules"]
+max_depth   = 6
+min_score   = 20
 ```
 
-Or a lighter touch — just use `fuzzy-cd pick <query>` directly and capture its output.
+## Non-goals
 
-### 4. Auto-jump on Single Match
+- Cloud sync.
+- Per-repo shortcuts.
+- Tmux/session awareness.
+- Middle-of-command completion (needs full shell plugin).
 
-If the query matches exactly one directory with high confidence, auto-selects it without interactive mode.
+## Modules
 
-### 5. Directory Indexing
-
-- Indexes `~` by default (configurable)
-- Runs in background on first run to build cache
-- `fuzzy-cd --reindex` forces rebuild
-- Index is a SQLite table: `index(path TEXT, basename TEXT, parent TEXT)`
-
-## User Interactions
-
-| Command | Behavior |
-|---|---|
-| `fuzzy-cd` (no args) | Opens interactive picker |
-| `fuzzy-cd pick <query>` | Non-interactive: prints best match path or empty |
-| `fuzzy-cd add <path>` | Manually add a path to history |
-| `fuzzy-cd history` | List top 20 visited directories |
-| `fuzzy-cd --clear-history` | Clear visit history |
-| `fuzzy-cd --reindex` | Rebuild directory index |
-| `fuzzy-cd --help` | Show help |
-
-## Component Inventory
-
-### `fuzzy-cd` binary (Rust)
-
-Single binary, no dependencies beyond standard library + SQLite (via rusqlite or similar).
-
-**States:**
-- No history DB → creates it silently on first run
-- Empty index → triggers background indexing, shows "Indexing ~..."
-- Query with matches → shows interactive picker
-- Query with one high-confidence match → auto-returns
-- Query with no matches → prints nothing, exits 1
-
-### Interactive Picker
-
-- Renders using terminal capabilities (cursor movement, clear line)
-- Each match shown as: `[score] /full/path/with/matched/bold`
-- Up/Down arrows navigate
-- Enter confirms selection
-- Typing filters in real-time
-- Esc/Ctrl+C exits with no output
-
-## Technical Approach
-
-**Language:** Rust (single binary, fast startup, no runtime needed)
-
-**Key crates:**
-- `rusqlite` for SQLite
-- `fuzzy-matcher` for fuzzy matching logic
-- `readline` or direct termios for interactive input
-- Standard library `std::process::Command` for shell integration
-
-**Database:** `~/.fuzzy-cd/history.db`
-
-**Files created:**
-- `~/.fuzzy-cd/history.db` — visit history
-- `~/.fuzzy-cd/index.db` — directory index
-- `~/.fuzzy-cd/config.toml` — optional config (index paths, max results)
-
-**Build:** `cargo build --release` → `fuzzy-cd` binary
-
-## Installation
-
-```bash
-cargo install fuzzy-cd
-# Then add to shell:
-echo 'source <(fuzzy-cd init)' >> ~/.zshrc
+```
+src/
+├── main.rs        thin entrypoint
+├── lib.rs         pub mod …
+├── cli.rs         arg dispatch + find_best()
+├── db.rs          Database + migrations
+├── score.rs       Scorer, Scored
+├── picker.rs      crossterm TUI
+├── init.rs        shell init scripts
+├── config.rs      Config loader
+├── import.rs      fasd + zsh history importers
+├── index.rs       filesystem indexer
+└── doctor.rs      diagnostics
 ```
 
-Or a simple install script:
-```bash
-curl -fsSL https://raw.githubusercontent.com/user/fuzzy-cd/main/install.sh | bash
-```
+## Tests
 
-## Out of Scope
-
-- Auto-completing in the middle of a typed command (requires shell plugin, not a CLI)
-- Cloud sync of history
-- Per-repo directory shortcuts
-- Tmux/terminal session awareness
+- 28 unit tests covering scoring ordering, migrations, import parsing,
+  config parsing, indexing, doctor.
+- 4 integration tests invoking the built binary via `CARGO_BIN_EXE_*`.
+- CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, release
+  build on ubuntu + macos.
