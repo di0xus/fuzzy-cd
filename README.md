@@ -1,13 +1,13 @@
-# fuzzy-cd
+# hop
 
 A smarter `cd` for your terminal. Type a scrap of a directory name and it
 jumps you to the right place.
 
 ```
-~ $ cd fuzy
-~/fuzzy-cd $
+~ $ cd hop
+~/hop $
 
-~/fuzzy-cd $ cd dl
+~ $ cd dl
 ~/Downloads $
 
 ~/Downloads $ cd work
@@ -36,11 +36,11 @@ You need Rust installed (`brew install rust` or
 
 ```bash
 git clone <this repo>
-cd fuzzy-cd
+cd hop
 cargo install --path .
 ```
 
-That puts a `fuzzy-cd` binary in `~/.cargo/bin`.
+That puts a `hop` binary in `~/.cargo/bin`.
 
 ### Hook it into your shell
 
@@ -49,19 +49,19 @@ Pick your shell and add one line.
 **Fish** — edit `~/.config/fish/config.fish`:
 
 ```fish
-fuzzy-cd init fish | source
+hop init fish | source
 ```
 
 **Zsh** — edit `~/.zshrc`:
 
 ```zsh
-eval "$(fuzzy-cd init zsh)"
+eval "$(hop init zsh)"
 ```
 
 **Bash** — edit `~/.bashrc`:
 
 ```bash
-eval "$(fuzzy-cd init bash)"
+eval "$(hop init bash)"
 ```
 
 Restart your shell (`exec fish`, `exec zsh`, etc.). That's it. `cd` is now
@@ -71,10 +71,10 @@ smart.
 
 ## How it works (the short version)
 
-1. Every time you `cd` somewhere, the shell quietly tells `fuzzy-cd`:
+1. Every time you `cd` somewhere, the shell quietly tells `hop`:
    *"we just went to `/Users/you/code/work`."*
-2. `fuzzy-cd` writes it down, counts how often you visit, notes when you
-   were last there.
+2. `hop` writes it down, counts how often you visit, notes when you were
+   last there.
 3. Next time you type `cd work`, it looks through everywhere you've been,
    scores each candidate, and picks the winner.
 
@@ -90,7 +90,7 @@ cd proj          # jump to best match for "proj"
 cd /tmp          # real paths still work
 cd ..            # so do the classics
 cd -             # previous directory
-fuzzy-cd         # open an interactive picker (arrow keys + enter)
+hop              # open an interactive picker (arrow keys + enter)
 ```
 
 ### Bookmarks for the places you live in
@@ -98,8 +98,8 @@ fuzzy-cd         # open an interactive picker (arrow keys + enter)
 Got a folder you visit ten times a day? Give it a short alias.
 
 ```bash
-fuzzy-cd book work ~/code/work
-fuzzy-cd book dot  ~/.config
+hop book work ~/code/work
+hop book dot  ~/.config
 
 cd work          # takes you straight there, every time
 cd dot
@@ -108,43 +108,43 @@ cd dot
 List or remove them:
 
 ```bash
-fuzzy-cd book list
-fuzzy-cd book rm work
+hop book list
+hop book rm work
 ```
 
 ### Seed it from your old history
 
 If you were already using zsh or
-[fasd](https://github.com/clvv/fasd), import that history so `fuzzy-cd`
-starts smart on day one:
+[fasd](https://github.com/clvv/fasd), import that history so `hop` starts
+smart on day one:
 
 ```bash
-fuzzy-cd import zsh  ~/.zsh_history
-fuzzy-cd import fasd ~/.fasd
+hop import zsh  ~/.zsh_history
+hop import fasd ~/.fasd
 ```
 
 ### Peek inside
 
 ```bash
-fuzzy-cd stats       # summary
-fuzzy-cd recent      # last 20 places you've been
-fuzzy-cd history     # top 20 by visit count
-fuzzy-cd doctor      # sanity check the setup
+hop stats        # summary
+hop recent       # last 20 places you've been
+hop history      # top 20 by visit count
+hop doctor       # sanity check the setup
 ```
 
 ### Housekeeping
 
 ```bash
-fuzzy-cd prune       # forget directories that no longer exist
-fuzzy-cd rm /path    # forget one specific path
-fuzzy-cd clear       # wipe the slate clean
+hop prune        # forget directories that no longer exist
+hop rm /path     # forget one specific path
+hop clear        # wipe the slate clean
 ```
 
 ---
 
 ## The interactive picker
 
-Running `fuzzy-cd` with no arguments opens a mini picker:
+Running `hop` with no arguments opens a mini picker:
 
 ```
 › proj
@@ -164,11 +164,11 @@ The `★` marks bookmarks.
 
 ## Tuning (optional)
 
-Create `~/Library/Application Support/fuzzy-cd/config.toml` if you want
-to customize it:
+Create `~/Library/Application Support/hop/config.toml` if you want to
+customize things:
 
 ```toml
-# Folders that get scanned during `fuzzy-cd reindex`
+# Folders that get scanned during `hop reindex`
 index_roots = ["~/code", "~/work"]
 
 # Folders to skip during indexing
@@ -181,8 +181,19 @@ max_depth = 6
 min_score = 20
 ```
 
-Then run `fuzzy-cd reindex` to build a filesystem index, which kicks in as
-a fallback when your history doesn't yet know a folder.
+Then run `hop reindex` to build a filesystem index, which kicks in as a
+fallback when your history doesn't yet know a folder.
+
+---
+
+## Upgrading from `fuzzy-cd`
+
+If you used the previous `fuzzy-cd` name: on first run, `hop` copies your
+old database from `~/Library/Application Support/fuzzy-cd/` into the new
+location automatically. Your history and bookmarks come with you.
+
+Old shell integration still calls `fuzzy-cd`, so replace that block with
+`hop init <shell> | source` (or `eval`) and restart the shell.
 
 ---
 
@@ -196,13 +207,13 @@ visits, fuzzy matching will pick it up. Or bookmark it.
 Tell it to forget the wrong one:
 
 ```bash
-fuzzy-cd rm /path/to/wrong/folder
+hop rm /path/to/wrong/folder
 ```
 
 **"Is it working at all?"**
 
 ```bash
-fuzzy-cd doctor
+hop doctor
 ```
 
 Should show `✓` everywhere. If not, reload your shell and try again.
@@ -211,15 +222,14 @@ Should show `✓` everywhere. If not, reload your shell and try again.
 Delete the database and start over — no harm done:
 
 ```bash
-rm -rf ~/Library/Application\ Support/fuzzy-cd
+rm -rf ~/Library/Application\ Support/hop
 ```
 
 ---
 
 ## What it stores
 
-One SQLite file at
-`~/Library/Application Support/fuzzy-cd/fuzzy-cd.db`. Four tables:
+One SQLite file at `~/Library/Application Support/hop/hop.db`. Four tables:
 paths you've visited, bookmarks, an optional folder index, and schema
 metadata. That's it.
 
@@ -244,9 +254,9 @@ ignores nothing by default (the skip list is only for the optional
 filesystem index).
 
 **Can I uninstall?**
-Yes. Remove the `fuzzy-cd init ...` line from your shell config, restart
-the shell, and `cargo uninstall fuzzy-cd`. Delete
-`~/Library/Application Support/fuzzy-cd` if you want the DB gone too.
+Yes. Remove the `hop init ...` line from your shell config, restart the
+shell, and `cargo uninstall hop`. Delete
+`~/Library/Application Support/hop` if you want the DB gone too.
 
 ---
 
