@@ -1,6 +1,6 @@
 [package]
 name = "fuzzy-cd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -8,3 +8,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 fuzzy-matcher = "0.3"
 directories = "6"
 dirs = "6"
+chrono = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
