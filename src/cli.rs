@@ -9,28 +9,28 @@ use crate::picker;
 use crate::score::{Scored, Scorer};
 use crate::{doctor, import};
 
-pub const HELP: &str = r#"fuzzy-cd — smart directory jump
+pub const HELP: &str = r#"hop — smart directory jump
 
 Usage:
-    fuzzy-cd <query>                  Jump to best match (prints path)
-    fuzzy-cd p|pick [query]           Same; empty query opens picker
-    fuzzy-cd add <path>               Record a visit
-    fuzzy-cd rm <path>                Remove from history
-    fuzzy-cd book <alias> [path]      Set/resolve bookmark
-    fuzzy-cd book rm <alias>          Remove bookmark
-    fuzzy-cd book list                List bookmarks
-    fuzzy-cd history [n]              Top n by visits (default 20)
-    fuzzy-cd recent [n]               Last n visited (default 20)
-    fuzzy-cd top                      Top 10 by visits
-    fuzzy-cd import fasd <file>       Import fasd data
-    fuzzy-cd import zsh <file>        Import zsh history
-    fuzzy-cd prune                    Remove stale (deleted) paths
-    fuzzy-cd clear                    Wipe history
-    fuzzy-cd stats                    DB stats
-    fuzzy-cd reindex                  Rebuild filesystem index
-    fuzzy-cd doctor                   Diagnose setup
-    fuzzy-cd init <bash|zsh|fish>     Emit shell integration
-    fuzzy-cd --help                   This help
+    hop <query>                  Jump to best match (prints path)
+    hop p|pick [query]           Same; empty query opens picker
+    hop add <path>               Record a visit
+    hop rm <path>                Remove from history
+    hop book <alias> [path]      Set/resolve bookmark
+    hop book rm <alias>          Remove bookmark
+    hop book list                List bookmarks
+    hop history [n]              Top n by visits (default 20)
+    hop recent [n]               Last n visited (default 20)
+    hop top                      Top 10 by visits
+    hop import fasd <file>       Import fasd data
+    hop import zsh <file>        Import zsh history
+    hop prune                    Remove stale (deleted) paths
+    hop clear                    Wipe history
+    hop stats                    DB stats
+    hop reindex                  Rebuild filesystem index
+    hop doctor                   Diagnose setup
+    hop init <bash|zsh|fish>     Emit shell integration
+    hop --help                   This help
 "#;
 
 pub fn run(args: Vec<String>) -> ExitCode {
@@ -82,7 +82,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         }
         "add" => {
             let Some(arg) = positional(&args, 2) else {
-                eprintln!("Usage: fuzzy-cd add <path>");
+                eprintln!("Usage: hop add <path>");
                 return ExitCode::from(2);
             };
             let path = expand_home(arg);
@@ -95,7 +95,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         }
         "rm" => {
             let Some(arg) = positional(&args, 2) else {
-                eprintln!("Usage: fuzzy-cd rm <path>");
+                eprintln!("Usage: hop rm <path>");
                 return ExitCode::from(2);
             };
             let path = expand_home(arg);
@@ -122,7 +122,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         }
         "import" => {
             if args.len() < 4 {
-                eprintln!("Usage: fuzzy-cd import <fasd|zsh> <file>");
+                eprintln!("Usage: hop import <fasd|zsh> <file>");
                 return ExitCode::from(2);
             }
             let source = args[2].as_str();
@@ -228,7 +228,7 @@ fn cmd_init(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         None => {
-            eprintln!("Usage: fuzzy-cd init <bash|zsh|fish>");
+            eprintln!("Usage: hop init <bash|zsh|fish>");
             ExitCode::from(2)
         }
     }
@@ -247,7 +247,7 @@ fn cmd_bookmark(db: &Database, args: &[String]) -> ExitCode {
         }
     } else if args[0] == "rm" {
         if args.len() < 2 {
-            eprintln!("Usage: fuzzy-cd book rm <alias>");
+            eprintln!("Usage: hop book rm <alias>");
             return ExitCode::from(2);
         }
         let _ = db.remove_bookmark(&args[1]);

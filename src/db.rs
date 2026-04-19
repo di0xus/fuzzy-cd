@@ -4,8 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, params};
 
-pub const APP_NAME: &str = "fuzzy-cd";
-pub const DB_NAME: &str = "fuzzy-cd.db";
+pub const APP_NAME: &str = "hop";
+pub const DB_NAME: &str = "hop.db";
+pub const LEGACY_APP_NAME: &str = "fuzzy-cd";
+pub const LEGACY_DB_NAME: &str = "fuzzy-cd.db";
 pub const SCHEMA_VERSION: i64 = 2;
 
 pub struct Database {
@@ -22,7 +24,38 @@ pub struct HistoryRow {
 pub fn default_data_dir() -> PathBuf {
     ProjectDirs::from("", "", APP_NAME)
         .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| home_dir().join(".hop"))
+}
+
+pub fn legacy_data_dir() -> PathBuf {
+    ProjectDirs::from("", "", LEGACY_APP_NAME)
+        .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| home_dir().join(".fuzzy-cd"))
+}
+
+/// If a legacy fuzzy-cd DB exists and the new one does not, copy it so the
+/// user's history survives the rename. One-shot; no-op otherwise.
+pub fn migrate_legacy_data_dir() {
+    let new_db = default_data_dir().join(DB_NAME);
+    if new_db.exists() {
+        return;
+    }
+    let legacy_db = legacy_data_dir().join(LEGACY_DB_NAME);
+    if !legacy_db.exists() {
+        return;
+    }
+    if let Some(parent) = new_db.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::copy(&legacy_db, &new_db);
+    // Best-effort copy of WAL/SHM siblings so we don't lose uncommitted rows.
+    for ext in ["-wal", "-shm"] {
+        let src = legacy_db.with_file_name(format!("{}{}", LEGACY_DB_NAME, ext));
+        let dst = new_db.with_file_name(format!("{}{}", DB_NAME, ext));
+        if src.exists() {
+            let _ = std::fs::copy(src, dst);
+        }
+    }
 }
 
 pub fn home_dir() -> PathBuf {
@@ -50,6 +83,7 @@ pub fn now_secs() -> f64 {
 
 impl Database {
     pub fn open() -> rusqlite::Result<Self> {
+        migrate_legacy_data_dir();
         Self::open_at(&default_data_dir().join(DB_NAME))
     }
 

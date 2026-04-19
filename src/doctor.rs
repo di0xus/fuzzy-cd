@@ -28,7 +28,7 @@ pub fn run(db: &Database) -> Report {
     if stale > 0 {
         ok = false;
         lines.push(format!(
-            "⚠ {} stale path(s) in history — run `fuzzy-cd prune` to remove",
+            "⚠ {} stale path(s) in history — run `hop prune` to remove",
             stale
         ));
     } else {
@@ -40,8 +40,7 @@ pub fn run(db: &Database) -> Report {
         None => {
             ok = false;
             lines.push(
-                "⚠ could not detect shell; add `eval \"$(fuzzy-cd init zsh)\"` to your rc"
-                    .to_string(),
+                "⚠ could not detect shell; add `eval \"$(hop init zsh)\"` to your rc".to_string(),
             );
         }
     }
