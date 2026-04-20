@@ -34,7 +34,7 @@ No more `cd ../../../some/long/path`. It learns where you go and remembers.
 One command, no Rust required:
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/di0xus/hop/main/install.sh | bash
 ```
 
 The script downloads the latest binary for your platform (`linux x86_64`,
