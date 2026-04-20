@@ -36,6 +36,39 @@ fn init_rejects_unknown_shell() {
 }
 
 #[test]
+fn init_shell_flag_works() {
+    let out = bin().args(["init", "--shell", "fish"]).output().unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("__hop_cd"));
+}
+
+#[test]
+fn init_verify_runs() {
+    let out = bin().args(["init", "--verify"]).output().unwrap();
+    // succeeds or fails depending on $SHELL; we only assert it emits lines.
+    let s = String::from_utf8_lossy(&out.stdout);
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(!s.is_empty() || !e.is_empty());
+}
+
+#[test]
+fn completions_emits_scripts() {
+    for shell in ["bash", "zsh", "fish"] {
+        let out = bin().args(["completions", shell]).output().unwrap();
+        assert!(out.status.success(), "completions {shell} failed");
+        let s = String::from_utf8_lossy(&out.stdout);
+        assert!(s.contains("hop"), "completions {shell} missing hop refs");
+    }
+}
+
+#[test]
+fn completions_rejects_unknown_shell() {
+    let out = bin().args(["completions", "nushell"]).output().unwrap();
+    assert!(!out.status.success());
+}
+
+#[test]
 fn add_then_pick_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
     let target = tmp.path().join("my-proj");

@@ -30,6 +30,9 @@ Formerly shipped as `fuzzy-cd`; renamed to `hop` in v0.4.
 | `hop reindex`                   | Rebuild filesystem index.               |
 | `hop doctor`                    | Diagnose DB + shell hook.               |
 | `hop init <bash|zsh|fish>`      | Emit shell integration.                 |
+| `hop init --shell <name>`       | Same, explicit flag form.              |
+| `hop init --verify`             | Sanity-check shell integration.        |
+| `hop completions <bash|zsh|fish>` | Emit tab-completion script.           |
 
 ## Scoring
 
@@ -105,7 +108,8 @@ src/
 ├── db.rs          Database + migrations + legacy copy
 ├── score.rs       Scorer, Scored
 ├── picker.rs      crossterm TUI
-├── init.rs        shell init scripts
+├── init.rs        shell init scripts + verify
+├── completions.rs tab-completion scripts
 ├── config.rs      Config loader
 ├── import.rs      fasd + zsh history importers
 ├── index.rs       filesystem indexer
@@ -114,9 +118,10 @@ src/
 
 ## Tests
 
-- 33 unit tests covering scoring ordering, migrations (incl. legacy v0.2
-  schema), import parsing, config parsing, indexing, doctor.
-- 4 integration tests invoking the built binary via
+- 39 unit tests covering scoring ordering, migrations (incl. legacy v0.2
+  schema), import parsing, config parsing, indexing, doctor, completions,
+  init verify.
+- 8 integration tests invoking the built binary via
   `CARGO_BIN_EXE_hop`.
 - CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`,
   release build on ubuntu + macos.

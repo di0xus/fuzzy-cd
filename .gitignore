@@ -2,3 +2,4 @@
 .hermes/
 **/*.db
 **/*.db-*
+.DS_Store

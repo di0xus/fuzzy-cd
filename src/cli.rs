@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+use crate::completions;
 use crate::config::Config;
 use crate::db::{expand_home, now_secs, Database, HistoryRow};
 use crate::index;
@@ -30,13 +31,19 @@ Usage:
     hop reindex                  Rebuild filesystem index
     hop doctor                   Diagnose setup
     hop init <bash|zsh|fish>     Emit shell integration
+    hop init --shell <shell>     Same, with explicit flag
+    hop init --verify            Check shell integration
+    hop completions <bash|zsh|fish>  Emit tab-completion script
     hop --help                   This help
 "#;
 
 pub fn run(args: Vec<String>) -> ExitCode {
-    // Fast-path: `init` needs no DB.
+    // Fast-path: `init` and `completions` need no DB.
     if args.len() >= 2 && args[1] == "init" {
         return cmd_init(&args);
+    }
+    if args.len() >= 2 && args[1] == "completions" {
+        return cmd_completions(&args);
     }
     if matches!(
         args.get(1).map(String::as_str),
@@ -303,14 +310,90 @@ fn positional(args: &[String], idx: usize) -> Option<&str> {
 }
 
 fn cmd_init(args: &[String]) -> ExitCode {
-    let shell = args.get(2).map(String::as_str).unwrap_or("");
-    match init::script_for(shell) {
+    // Flags: --verify, --shell <name>. Positional shell name still works.
+    let rest: Vec<&str> = args[2..].iter().map(String::as_str).collect();
+    let mut shell: Option<&str> = None;
+    let mut verify = false;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--verify" => verify = true,
+            "--shell" => {
+                i += 1;
+                if i >= rest.len() {
+                    eprintln!("--shell requires an argument");
+                    return ExitCode::from(2);
+                }
+                shell = Some(rest[i]);
+            }
+            s if !s.starts_with('-') => shell = Some(s),
+            s => {
+                eprintln!("unknown init flag: {}", s);
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+
+    if verify {
+        let r = init::verify();
+        for line in &r.lines {
+            println!("{}", line);
+        }
+        return if r.ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        };
+    }
+
+    let chosen: Option<String> = shell
+        .map(str::to_owned)
+        .or_else(|| init::detect_shell().map(str::to_owned));
+    match chosen.as_deref().and_then(init::script_for) {
         Some(s) => {
             print!("{}", s);
             ExitCode::SUCCESS
         }
         None => {
-            eprintln!("Usage: hop init <bash|zsh|fish>");
+            eprintln!("Usage: hop init <bash|zsh|fish> | --shell <name> | --verify");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_completions(args: &[String]) -> ExitCode {
+    let rest: Vec<&str> = args[2..].iter().map(String::as_str).collect();
+    let mut shell: Option<&str> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--shell" => {
+                i += 1;
+                if i >= rest.len() {
+                    eprintln!("--shell requires an argument");
+                    return ExitCode::from(2);
+                }
+                shell = Some(rest[i]);
+            }
+            s if !s.starts_with('-') => shell = Some(s),
+            s => {
+                eprintln!("unknown completions flag: {}", s);
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+    let chosen: Option<String> = shell
+        .map(str::to_owned)
+        .or_else(|| init::detect_shell().map(str::to_owned));
+    match chosen.as_deref().and_then(completions::script_for) {
+        Some(s) => {
+            print!("{}", s);
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("Usage: hop completions <bash|zsh|fish>");
             ExitCode::from(2)
         }
     }
