@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hop install.sh — curl-based installation
-# Usage: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/di0xus/hop/main/install.sh | bash
 set -e
 
 REPO="di0xus/hop"
