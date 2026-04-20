@@ -130,7 +130,7 @@ src/
 Install via a single curl command:
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/di0xus/hop/main/install.sh | bash
 ```
 
 The install script detects OS + architecture and downloads the correct
