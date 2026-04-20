@@ -114,7 +114,7 @@ src/
 
 ## Tests
 
-- 29 unit tests covering scoring ordering, migrations (incl. legacy v0.2
+- 33 unit tests covering scoring ordering, migrations (incl. legacy v0.2
   schema), import parsing, config parsing, indexing, doctor.
 - 4 integration tests invoking the built binary via
   `CARGO_BIN_EXE_hop`.

@@ -11,7 +11,7 @@ pub const LEGACY_DB_NAME: &str = "fuzzy-cd.db";
 pub const SCHEMA_VERSION: i64 = 2;
 
 pub struct Database {
-    pub conn: Connection,
+    conn: Connection,
 }
 
 pub struct HistoryRow {
@@ -228,6 +228,7 @@ impl Database {
 
     pub fn clear_history(&self) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM history", [])?;
+        self.conn.execute("DELETE FROM dir_index", [])?;
         Ok(())
     }
 
@@ -257,6 +258,25 @@ impl Database {
             }
         }
         Ok(removed)
+    }
+
+    /// Returns paths that would be removed by prune_stale, without deleting anything.
+    pub fn prune_stale_dry_run(&self) -> rusqlite::Result<(Vec<String>, Vec<String>)> {
+        let history_stale: Vec<String> = self
+            .conn
+            .prepare("SELECT path FROM history")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .flatten()
+            .filter(|p| !Path::new(p).is_dir())
+            .collect();
+        let index_stale: Vec<String> = self
+            .conn
+            .prepare("SELECT path FROM dir_index")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .flatten()
+            .filter(|p| !Path::new(p).is_dir())
+            .collect();
+        Ok((history_stale, index_stale))
     }
 
     pub fn history_rows(&self) -> rusqlite::Result<Vec<HistoryRow>> {
@@ -313,6 +333,13 @@ impl Database {
             .flatten()
             .collect();
         Ok(rows)
+    }
+
+    /// Returns rows filtered to only include paths that still exist on disk.
+    pub fn filter_live_rows(rows: Vec<HistoryRow>) -> Vec<HistoryRow> {
+        rows.into_iter()
+            .filter(|r| Path::new(&r.path).is_dir())
+            .collect()
     }
 
     pub fn bookmark_exact(&self, alias: &str) -> rusqlite::Result<Option<String>> {

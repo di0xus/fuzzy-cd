@@ -121,10 +121,10 @@ fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
         }
         if let Ok(rows) = db.history_rows() {
             for r in rows {
-                if let Some(s) = scorer.score_history(&r, query)
-                    && std::path::Path::new(&s.path).is_dir()
-                {
-                    candidates.push(s);
+                if let Some(s) = scorer.score_history(&r, query) {
+                    if std::path::Path::new(&s.path).is_dir() {
+                        candidates.push(s);
+                    }
                 }
             }
         }
@@ -209,4 +209,68 @@ fn render_highlighted<W: Write>(out: &mut W, path: &str, indices: &[usize]) -> i
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_items_empty_query_returns_recent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+        let target = tmp.path().join("recent-dir");
+        std::fs::create_dir(&target).unwrap();
+        db.record_visit(&target.to_string_lossy()).unwrap();
+
+        let items = compute_items(&db, "");
+        assert!(!items.is_empty(), "empty query should return recent items");
+        assert_eq!(items[0].source, Source::History);
+    }
+
+    #[test]
+    fn compute_items_filters_deleted_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+        let alive = tmp.path().join("alive");
+        let dead = tmp.path().join("dead");
+        std::fs::create_dir(&alive).unwrap();
+        std::fs::create_dir(&dead).unwrap();
+        db.record_visit(&alive.to_string_lossy()).unwrap();
+        db.record_visit(&dead.to_string_lossy()).unwrap();
+        std::fs::remove_dir(&dead).unwrap();
+
+        let items = compute_items(&db, "dead");
+        let paths: Vec<_> = items.iter().map(|i| i.path.clone()).collect();
+        assert!(!paths.iter().any(|p| p.contains("dead")),
+            "deleted path should not appear, got: {:?}", paths);
+    }
+
+    #[test]
+    fn compute_items_non_empty_query_returns_scored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+        let target = tmp.path().join("my-project");
+        std::fs::create_dir(&target).unwrap();
+        db.record_visit(&target.to_string_lossy()).unwrap();
+
+        let items = compute_items(&db, "proj");
+        assert!(!items.is_empty(), "query 'proj' should match 'my-project'");
+    }
+
+    #[test]
+    fn compute_items_deduplicates_by_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+        let target = tmp.path().join("dup");
+        std::fs::create_dir(&target).unwrap();
+        db.record_visit(&target.to_string_lossy()).unwrap();
+        db.record_visit(&target.to_string_lossy()).unwrap();
+        db.record_visit(&target.to_string_lossy()).unwrap();
+
+        let items = compute_items(&db, "dup");
+        let paths: Vec<_> = items.iter().map(|i| i.path.clone()).collect();
+        assert_eq!(paths.len(), paths.iter().collect::<std::collections::HashSet<_>>().len(),
+            "paths should not be duplicated, got: {:?}", paths);
+    }
 }
