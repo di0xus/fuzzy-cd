@@ -2,13 +2,14 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use crossterm::{
-    QueueableCommand, cursor,
+    cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    QueueableCommand,
 };
 
-use crate::db::{Database, now_secs};
+use crate::db::{now_secs, Database};
 use crate::score::{Scored, Scorer, Source};
 
 const VISIBLE_ROWS: usize = 10;
@@ -242,8 +243,11 @@ mod tests {
 
         let items = compute_items(&db, "dead");
         let paths: Vec<_> = items.iter().map(|i| i.path.clone()).collect();
-        assert!(!paths.iter().any(|p| p.contains("dead")),
-            "deleted path should not appear, got: {:?}", paths);
+        assert!(
+            !paths.iter().any(|p| p.contains("dead")),
+            "deleted path should not appear, got: {:?}",
+            paths
+        );
     }
 
     #[test]
@@ -270,7 +274,11 @@ mod tests {
 
         let items = compute_items(&db, "dup");
         let paths: Vec<_> = items.iter().map(|i| i.path.clone()).collect();
-        assert_eq!(paths.len(), paths.iter().collect::<std::collections::HashSet<_>>().len(),
-            "paths should not be duplicated, got: {:?}", paths);
+        assert_eq!(
+            paths.len(),
+            paths.iter().collect::<std::collections::HashSet<_>>().len(),
+            "paths should not be duplicated, got: {:?}",
+            paths
+        );
     }
 }

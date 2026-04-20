@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 
 use crate::db::HistoryRow;
 
@@ -153,9 +153,8 @@ mod tests {
     #[test]
     fn no_match_returns_none() {
         let s = Scorer::new(1_000_000.0);
-        assert!(
-            s.score_history(&row("/a/b", 1, 0.0, false), "zzzzzz")
-                .is_none()
-        );
+        assert!(s
+            .score_history(&row("/a/b", 1, 0.0, false), "zzzzzz")
+            .is_none());
     }
 }
