@@ -18,16 +18,15 @@ Usage:
     hop rm <path>                Remove from history (exact path)
     hop forget|zap <query>       Fuzzy-find and remove from history
     hop book <alias> [path]      Set/resolve bookmark
-    hop book rm <alias>          Remove bookmark
+    hop book rm <alias>          Delete bookmark
     hop book list                List bookmarks
     hop history [n]              Top n by visits (default 20)
     hop recent [n]               Last n visited (default 20)
-    hop top                      Top 10 by visits
-    hop import fasd <file>       Import fasd data
-    hop import zsh <file>        Import zsh history
-    hop prune                    Remove stale (deleted) paths
-    hop clear                    Wipe history
-    hop stats                    DB stats
+    hop top                      Top 10.
+    hop import fasd|zsh <file>    Import from another tool.
+    hop prune [--dry-run]         Remove stale (deleted) paths
+    hop clear [--force]           Wipe history (prompts by default)
+    hop stats                    DB stats.
     hop reindex                  Rebuild filesystem index
     hop doctor                   Diagnose setup
     hop init <bash|zsh|fish>     Emit shell integration
@@ -134,18 +133,18 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "history" => {
             let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
             let rows = db.top(n).unwrap_or_default();
-            print_rows(&rows);
+            print_rows(&Database::filter_live_rows(rows));
             ExitCode::SUCCESS
         }
         "top" => {
             let rows = db.top(10).unwrap_or_default();
-            print_rows(&rows);
+            print_rows(&Database::filter_live_rows(rows));
             ExitCode::SUCCESS
         }
         "recent" => {
             let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
             let rows = db.recent(n).unwrap_or_default();
-            print_rows(&rows);
+            print_rows(&Database::filter_live_rows(rows));
             ExitCode::SUCCESS
         }
         "import" => {
@@ -175,17 +174,67 @@ pub fn run(args: Vec<String>) -> ExitCode {
             }
         }
         "prune" => {
-            let removed = db.prune_stale().unwrap_or(0);
-            println!(
-                "pruned {} stale entr{}",
-                removed,
-                if removed == 1 { "y" } else { "ies" }
-            );
+            let dry_run = args.get(2).map(String::as_str) == Some("--dry-run");
+            if dry_run {
+                match db.prune_stale_dry_run() {
+                    Ok((history_stale, index_stale)) => {
+                        let total = history_stale.len() + index_stale.len();
+                        if total == 0 {
+                            println!("nothing to prune");
+                        } else {
+                            println!("history ({}):", history_stale.len());
+                            for p in &history_stale {
+                                println!("  - {}", p);
+                            }
+                            println!("index ({}):", index_stale.len());
+                            for p in &index_stale {
+                                println!("  - {}", p);
+                            }
+                            println!("\n{} stale entr{} total. Run without --dry-run to remove.",
+                                total, if total == 1 { "y" } else { "ies" });
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("prune dry-run failed: {}", e);
+                        return ExitCode::from(1);
+                    }
+                }
+            } else {
+                match db.prune_stale() {
+                    Ok(removed) => {
+                        println!(
+                            "pruned {} stale entr{}",
+                            removed,
+                            if removed == 1 { "y" } else { "ies" }
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("prune failed: {}", e);
+                        return ExitCode::from(1);
+                    }
+                }
+            }
             ExitCode::SUCCESS
         }
         "clear" => {
-            let _ = db.clear_history();
-            println!("history cleared");
+            let force = args.get(2).map(String::as_str) == Some("--force");
+            if !force {
+                eprint!("this will wipe ALL history and the directory index. type 'yes' to confirm: ");
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_err() || input.trim() != "yes" {
+                    println!("aborted");
+                    return ExitCode::from(1);
+                }
+            }
+            match db.clear_history() {
+                Ok(()) => {
+                    println!("history cleared");
+                }
+                Err(e) => {
+                    eprintln!("clear failed: {}", e);
+                    return ExitCode::from(1);
+                }
+            }
             ExitCode::SUCCESS
         }
         "stats" => match db.counts() {
@@ -319,10 +368,10 @@ fn run_picker_and_print(query: &str) -> ExitCode {
 
 pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
     // exact bookmark alias short-circuits
-    if let Ok(Some(p)) = db.bookmark_exact(query)
-        && Path::new(&p).is_dir()
-    {
-        return Some(p);
+    if let Ok(Some(p)) = db.bookmark_exact(query) {
+        if Path::new(&p).is_dir() {
+            return Some(p);
+        }
     }
 
     let scorer = Scorer::new(now_secs());
@@ -330,34 +379,34 @@ pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
 
     if let Ok(bms) = db.bookmarks() {
         for (alias, path) in bms {
-            if let Some(s) = scorer.score_bookmark(&alias, &path, query)
-                && Path::new(&s.path).is_dir()
-            {
-                cands.push(s);
+            if let Some(s) = scorer.score_bookmark(&alias, &path, query) {
+                if Path::new(&s.path).is_dir() {
+                    cands.push(s);
+                }
             }
         }
     }
 
     if let Ok(rows) = db.history_rows() {
         for r in rows {
-            if let Some(s) = scorer.score_history(&r, query)
-                && Path::new(&s.path).is_dir()
-            {
-                cands.push(s);
+            if let Some(s) = scorer.score_history(&r, query) {
+                if Path::new(&s.path).is_dir() {
+                    cands.push(s);
+                }
             }
         }
     }
 
     // Fallback to filesystem index if nothing strong found
     let best_history = cands.iter().map(|c| c.score).max().unwrap_or(0);
-    if best_history < cfg.min_score * 2
-        && let Ok(paths) = db.index_rows()
-    {
-        for p in paths {
-            if let Some(s) = scorer.score_indexed(&p, query)
-                && Path::new(&s.path).is_dir()
-            {
-                cands.push(s);
+    if best_history < cfg.min_score * 2 {
+        if let Ok(paths) = db.index_rows() {
+            for p in paths {
+                if let Some(s) = scorer.score_indexed(&p, query) {
+                    if Path::new(&s.path).is_dir() {
+                        cands.push(s);
+                    }
+                }
             }
         }
     }
