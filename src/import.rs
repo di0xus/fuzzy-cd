@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::db::{Database, expand_home};
+use crate::db::{expand_home, Database};
 
 pub struct ImportStats {
     pub imported: usize,

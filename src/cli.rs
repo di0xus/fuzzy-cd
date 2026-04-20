@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use crate::config::Config;
-use crate::db::{Database, HistoryRow, expand_home, now_secs};
+use crate::db::{expand_home, now_secs, Database, HistoryRow};
 use crate::index;
 use crate::init;
 use crate::picker;
@@ -190,8 +190,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
                             for p in &index_stale {
                                 println!("  - {}", p);
                             }
-                            println!("\n{} stale entr{} total. Run without --dry-run to remove.",
-                                total, if total == 1 { "y" } else { "ies" });
+                            println!(
+                                "\n{} stale entr{} total. Run without --dry-run to remove.",
+                                total,
+                                if total == 1 { "y" } else { "ies" }
+                            );
                         }
                     }
                     Err(e) => {
@@ -219,7 +222,9 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "clear" => {
             let force = args.get(2).map(String::as_str) == Some("--force");
             if !force {
-                eprint!("this will wipe ALL history and the directory index. type 'yes' to confirm: ");
+                eprint!(
+                    "this will wipe ALL history and the directory index. type 'yes' to confirm: "
+                );
                 let mut input = String::new();
                 if std::io::stdin().read_line(&mut input).is_err() || input.trim() != "yes" {
                     println!("aborted");
