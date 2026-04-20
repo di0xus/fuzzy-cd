@@ -7,6 +7,58 @@ pub fn script_for(shell: &str) -> Option<&'static str> {
     }
 }
 
+/// Detect the user's shell from `$SHELL`.
+pub fn detect_shell() -> Option<&'static str> {
+    let shell = std::env::var("SHELL").ok()?;
+    if shell.ends_with("zsh") {
+        Some("zsh")
+    } else if shell.ends_with("bash") {
+        Some("bash")
+    } else if shell.ends_with("fish") {
+        Some("fish")
+    } else {
+        None
+    }
+}
+
+pub struct VerifyReport {
+    pub ok: bool,
+    pub lines: Vec<String>,
+}
+
+/// Sanity-check the user's shell integration without actually loading it.
+/// Detects the shell, confirms a script exists, and prints how to wire it up.
+pub fn verify() -> VerifyReport {
+    let mut lines = Vec::new();
+    let Some(shell) = detect_shell() else {
+        return VerifyReport {
+            ok: false,
+            lines: vec![
+                "✗ could not detect shell from $SHELL".into(),
+                "  pick one manually: hop init bash|zsh|fish".into(),
+            ],
+        };
+    };
+    lines.push(format!("✓ detected shell: {}", shell));
+
+    if script_for(shell).is_none() {
+        lines.push(format!("✗ no init script for {}", shell));
+        return VerifyReport { ok: false, lines };
+    }
+    lines.push(format!("✓ init script available for {}", shell));
+
+    let hint = match shell {
+        "bash" => "add to ~/.bashrc:    eval \"$(hop init bash)\"",
+        "zsh" => "add to ~/.zshrc:     eval \"$(hop init zsh)\"",
+        "fish" => "add to ~/.config/fish/config.fish:   hop init fish | source",
+        _ => unreachable!(),
+    };
+    lines.push(format!("→ {}", hint));
+    lines.push("  then open a new shell and run: hop doctor".into());
+
+    VerifyReport { ok: true, lines }
+}
+
 const BASH: &str = r#"# hop bash integration
 __hop_chpwd() { command hop add -- "$PWD" >/dev/null 2>&1; }
 case ":${PROMPT_COMMAND:-}:" in
@@ -121,5 +173,11 @@ mod tests {
             assert!(s.contains("__hop_cd"), "{shell} missing cd wrapper");
             assert!(!s.contains("fuzzy-cd"), "{shell} still references old name");
         }
+    }
+
+    #[test]
+    fn verify_reports_something() {
+        let r = verify();
+        assert!(!r.lines.is_empty());
     }
 }
