@@ -52,6 +52,10 @@ pub fn run(args: Vec<String>) -> ExitCode {
         print!("{}", HELP);
         return ExitCode::SUCCESS;
     }
+    if matches!(args.get(1).map(String::as_str), Some("--version" | "-v")) {
+        println!("hop {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     if args.len() == 1 {
         // bare invocation → picker
         return run_picker_and_print("");
