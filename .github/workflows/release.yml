@@ -11,21 +11,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  # Build Linux targets on ubuntu
+  build-linux:
     name: build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: macos-latest
-            target: x86_64-apple-darwin
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - target: x86_64-unknown-linux-gnu
+            artifact: hop-x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+            artifact: hop-aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,7 +31,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: install cross linker (linux aarch64)
+      - name: install cross linker (aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
@@ -43,68 +40,61 @@ jobs:
           printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' > .cargo/config.toml
       - name: build
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: generate completion scripts
-        run: |
-          mkdir -p completions
-          ./target/${{ matrix.target }}/release/hop completions bash > completions/hop.bash || true
-          ./target/${{ matrix.target }}/release/hop completions zsh  > completions/_hop       || true
-          ./target/${{ matrix.target }}/release/hop completions fish > completions/hop.fish  || true
-        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'x86_64-apple-darwin'
-      - name: package
-        run: |
-          set -eux
-          version="${GITHUB_REF_NAME#v}"
-          name="hop-${version}-${{ matrix.target }}"
-          mkdir "$name"
-          cp "target/${{ matrix.target }}/release/hop" "$name/"
-          cp README.md LICENSE "$name/" 2>/dev/null || true
-          if [ -d completions ]; then cp -r completions "$name/"; fi
-          tar -czf "${name}.tar.gz" "$name"
-          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
-      - name: upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: rename binary
+        run: cp target/${{ matrix.target }}/release/hop "${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v4
         with:
-          name: hop-${{ matrix.target }}
-          path: |
-            hop-*.tar.gz
-            hop-*.tar.gz.sha256
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
 
-  completions:
-    name: completion scripts
-    runs-on: ubuntu-latest
+  # Build macOS targets on macos (required for Apple targets)
+  build-macos:
+    name: build ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            artifact: hop-x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+            artifact: hop-aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: build
-        run: cargo build --release --locked
-      - name: emit completions
-        run: |
-          mkdir -p completions
-          ./target/release/hop completions bash > completions/hop.bash
-          ./target/release/hop completions zsh  > completions/_hop
-          ./target/release/hop completions fish > completions/hop.fish
-      - name: upload
-        uses: actions/upload-artifact@v4
         with:
-          name: completions
-          path: completions
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: rename binary
+        run: cp target/${{ matrix.target }}/release/hop "${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
 
+  # Single release job downloads all artifacts and publishes
   release:
-    name: publish github release
-    needs: [build, completions]
+    name: create release
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
-      - name: flatten
-        run: |
-          mkdir -p out
-          find dist -type f \( -name 'hop-*.tar.gz*' -o -name 'hop.bash' -o -name '_hop' -o -name 'hop.fish' \) -exec cp {} out/ \;
-          ls -la out
-      - name: release
+          merge-multiple: true
+      - name: make install.sh executable
+        run: chmod +x install.sh
+      - name: attach install script
+        run: cp install.sh dist/
+      - name: list dist
+        run: ls -lh dist/
+      - name: create release
         uses: softprops/action-gh-release@v2
         with:
-          files: out/*
+          files: dist/*
           generate_release_notes: true

@@ -31,16 +31,23 @@ No more `cd ../../../some/long/path`. It learns where you go and remembers.
 
 ## Install
 
-You need Rust installed (`brew install rust` or
-[rustup.rs](https://rustup.rs/)).
+One command, no Rust required:
 
 ```bash
-git clone <this repo>
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+```
+
+The script downloads the latest binary for your platform (`linux x86_64`,
+`linux aarch64`, `macos x86_64`, or `macos aarch64`), places it in
+`~/.local/bin`, and tells you if you need to add that to your `PATH`.
+
+### From source (requires Rust)
+
+```bash
+git clone https://github.com/di0xus/hop
 cd hop
 cargo install --path .
 ```
-
-That puts a `hop` binary in `~/.cargo/bin`.
 
 ### Hook it into your shell
 

@@ -123,5 +123,17 @@ src/
   init verify.
 - 8 integration tests invoking the built binary via
   `CARGO_BIN_EXE_hop`.
-- CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`,
-  release build on ubuntu + macos.
+- CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.
+
+## Distribution
+
+Install via a single curl command:
+
+```bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+```
+
+The install script detects OS + architecture and downloads the correct
+binary from the GitHub Releases page. Releases are built for four targets:
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-apple-darwin`, `aarch64-apple-darwin`.
