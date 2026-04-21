@@ -10,6 +10,12 @@ pub struct Config {
     pub min_score: i64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ParseWarnings {
+    pub unknown_keys: Vec<String>,
+    pub invalid_values: Vec<String>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -64,21 +70,42 @@ impl Config {
         Self::load_from(&Self::default_path())
     }
 
-    pub fn load_from(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(s) => Self::parse(&s),
-            Err(_) => Config::default(),
+    /// Load config and print any warnings to stderr.
+    pub fn load_with_warnings() -> (Self, ParseWarnings) {
+        let path = Self::default_path();
+        let mut warnings = ParseWarnings::default();
+        let cfg = Self::load_from_with_warnings(&path, &mut warnings);
+        for unk in &warnings.unknown_keys {
+            eprintln!(
+                "hop: warning: unknown config key '{}' in {}",
+                unk,
+                path.display()
+            );
         }
+        for iv in &warnings.invalid_values {
+            eprintln!("hop: warning: {} in {}", iv, path.display());
+        }
+        (cfg, warnings)
+    }
+
+    pub fn load_from(path: &Path) -> Self {
+        let mut warnings = ParseWarnings::default();
+        Self::load_from_with_warnings(path, &mut warnings)
     }
 
     /// Tiny purpose-built parser — we only support the handful of keys we own.
     /// Grammar: `key = value`, `# comment`, arrays `key = ["a", "b"]`.
-    pub fn parse(src: &str) -> Self {
+    pub fn load_from_with_warnings(path: &Path, warnings: &mut ParseWarnings) -> Self {
         let mut cfg = Config::default();
         let mut explicit_roots: Option<Vec<PathBuf>> = None;
         let mut explicit_skip: Option<Vec<String>> = None;
 
-        for raw in src.lines() {
+        let content = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => return Config::default(),
+        };
+
+        for raw in content.lines() {
             let line = raw.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
                 continue;
@@ -103,14 +130,33 @@ impl Config {
                 "max_depth" => {
                     if let Ok(n) = value.parse::<usize>() {
                         cfg.max_depth = n;
+                    } else {
+                        warnings.invalid_values.push(format!(
+                            "invalid max_depth value '{}' (expected positive integer)",
+                            value
+                        ));
                     }
                 }
                 "min_score" => {
                     if let Ok(n) = value.parse::<i64>() {
-                        cfg.min_score = n;
+                        if n < 0 {
+                            warnings.invalid_values.push(format!(
+                                "invalid min_score value '{}' (expected non-negative integer)",
+                                value
+                            ));
+                        } else {
+                            cfg.min_score = n;
+                        }
+                    } else {
+                        warnings.invalid_values.push(format!(
+                            "invalid min_score value '{}' (expected integer)",
+                            value
+                        ));
                     }
                 }
-                _ => {}
+                _ => {
+                    warnings.unknown_keys.push(key.to_string());
+                }
             }
         }
         if let Some(roots) = explicit_roots {
@@ -140,19 +186,30 @@ fn parse_string_array(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::score::MIN_SCORE;
 
     #[test]
     fn parse_defaults_when_empty() {
-        let c = Config::parse("");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        let mut warnings = ParseWarnings::default();
+        let c = Config::load_from_with_warnings(&path, &mut warnings);
         assert!(c.max_depth > 0);
         assert!(!c.skip_dirs.is_empty());
     }
 
     #[test]
     fn parse_overrides() {
-        let c = Config::parse(
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
             "# hi\nindex_roots = [\"/a/code\", \"/srv\"]\nskip_dirs = [\"foo\"]\nmax_depth = 3\nmin_score = 50\n",
-        );
+        )
+        .unwrap();
+        let mut warnings = ParseWarnings::default();
+        let c = Config::load_from_with_warnings(&path, &mut warnings);
         assert_eq!(
             c.index_roots,
             vec![PathBuf::from("/a/code"), PathBuf::from("/srv")]
@@ -168,5 +225,48 @@ mod tests {
         assert!(c.should_skip(".git"));
         assert!(c.should_skip("node_modules"));
         assert!(!c.should_skip("src"));
+    }
+
+    #[test]
+    fn parse_warns_on_invalid_min_score_negative() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "min_score = -5\n").unwrap();
+        let mut warnings = ParseWarnings::default();
+        let c = Config::load_from_with_warnings(&path, &mut warnings);
+        assert!(!warnings.invalid_values.is_empty());
+        assert!(
+            warnings
+                .invalid_values
+                .iter()
+                .any(|w| w.contains("min_score")),
+            "should warn about invalid min_score"
+        );
+        // Negative was not applied; should keep default
+        assert_eq!(c.min_score, MIN_SCORE);
+    }
+
+    #[test]
+    fn parse_warns_on_invalid_min_score_non_integer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "min_score = hello\n").unwrap();
+        let mut warnings = ParseWarnings::default();
+        let c = Config::load_from_with_warnings(&path, &mut warnings);
+        assert!(!warnings.invalid_values.is_empty());
+        assert_eq!(c.min_score, MIN_SCORE);
+    }
+
+    #[test]
+    fn parse_warns_on_unknown_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "unknown_key = 123\n").unwrap();
+        let mut warnings = ParseWarnings::default();
+        let _c = Config::load_from_with_warnings(&path, &mut warnings);
+        assert!(
+            warnings.unknown_keys.iter().any(|k| k == "unknown_key"),
+            "should warn about unknown key"
+        );
     }
 }

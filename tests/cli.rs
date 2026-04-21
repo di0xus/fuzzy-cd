@@ -86,11 +86,13 @@ fn add_then_pick_roundtrip() {
     cmd2.env("HOME", tmp.path())
         .env("XDG_DATA_HOME", tmp.path());
     let pick = cmd2.args(["p", "proj"]).output().unwrap();
+    // hop now stores canonical paths; canonicalize target before comparing
+    let target_canonical = std::fs::canonicalize(target).unwrap();
     let out = String::from_utf8_lossy(&pick.stdout);
     assert!(
-        out.trim() == target.to_string_lossy(),
+        out.trim() == target_canonical.to_string_lossy(),
         "expected {}, got {}",
-        target.display(),
-        out
+        target_canonical.display(),
+        out,
     );
 }

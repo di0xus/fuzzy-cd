@@ -74,6 +74,15 @@ pub fn expand_home(path: &str) -> PathBuf {
     }
 }
 
+/// Resolve a path to its canonical form, following symlinks.
+/// Returns the canonical path as a string, or None if resolution fails.
+pub fn canonicalize_path(path: &str) -> Option<String> {
+    let p = Path::new(path);
+    p.canonicalize()
+        .ok()
+        .map(|c| c.to_string_lossy().into_owned())
+}
+
 pub fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -207,8 +216,11 @@ impl Database {
 
     pub fn record_visit(&self, path: &str) -> rusqlite::Result<()> {
         let now = now_secs();
-        let basename = basename_of(path);
-        let is_git = Path::new(path).join(".git").exists() as i64;
+        // Resolve symlinks to canonical path so /link/to/project and
+        // /real/project share one history row.
+        let canonical = canonicalize_path(path).unwrap_or_else(|| path.to_string());
+        let basename = basename_of(&canonical);
+        let is_git = Path::new(&canonical).join(".git").exists() as i64;
         self.conn.execute(
             "INSERT INTO history (path, basename, visits, last_visited, created_at, is_git_repo)
              VALUES (?1, ?2, 1, ?3, ?3, ?4)
@@ -216,7 +228,7 @@ impl Database {
                 visits = visits + 1,
                 last_visited = ?3,
                 is_git_repo = ?4",
-            params![path, basename, now, is_git],
+            params![canonical, basename, now, is_git],
         )?;
         Ok(())
     }
@@ -233,29 +245,49 @@ impl Database {
     }
 
     pub fn prune_stale(&self) -> rusqlite::Result<usize> {
-        let paths: Vec<String> = self
+        self.prune_stale_batch(256, |_, _| {})
+    }
+
+    /// Remove stale history/index entries, processing in batches of `batch_size`.
+    /// Calls `progress` with (processed, total) after each batch.
+    pub fn prune_stale_batch<F>(&self, batch_size: usize, progress: F) -> rusqlite::Result<usize>
+    where
+        F: Fn(usize, usize),
+    {
+        // History stale
+        let history_paths: Vec<String> = self
             .conn
             .prepare("SELECT path FROM history")?
             .query_map([], |r| r.get::<_, String>(0))?
             .flatten()
             .collect();
+        let total = history_paths.len();
         let mut removed = 0;
-        for p in paths {
-            if !Path::new(&p).is_dir() {
-                removed += self.forget(&p)?;
+        for batch in history_paths.chunks(batch_size) {
+            for p in batch {
+                if !Path::new(p).is_dir() {
+                    removed += self.forget(p)?;
+                }
             }
+            progress(batch.len(), total);
         }
+
+        // Index stale
         let idx_paths: Vec<String> = self
             .conn
             .prepare("SELECT path FROM dir_index")?
             .query_map([], |r| r.get::<_, String>(0))?
             .flatten()
             .collect();
-        for p in idx_paths {
-            if !Path::new(&p).is_dir() {
-                self.conn
-                    .execute("DELETE FROM dir_index WHERE path = ?1", params![p])?;
+        let total_idx = idx_paths.len();
+        for batch in idx_paths.chunks(batch_size) {
+            for p in batch {
+                if !Path::new(p).is_dir() {
+                    self.conn
+                        .execute("DELETE FROM dir_index WHERE path = ?1", params![p])?;
+                }
             }
+            progress(batch.len(), total_idx);
         }
         Ok(removed)
     }
@@ -432,6 +464,18 @@ impl Database {
             top_path,
         })
     }
+
+    /// Returns the schema version stored in the meta table, or 0 if not set.
+    pub fn schema_version(&self) -> rusqlite::Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|opt| opt.unwrap_or(0))
+    }
 }
 
 pub struct DbCounts {
@@ -522,5 +566,75 @@ mod tests {
     #[test]
     fn basename_lowercased() {
         assert_eq!(basename_of("/Users/Foo/Bar"), "bar");
+    }
+
+    #[test]
+    fn record_visit_with_unicode_and_special_chars() {
+        let db = Database::in_memory().unwrap();
+        // Spaces
+        db.record_visit("/tmp/a b").unwrap();
+        let rows = db.history_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "/tmp/a b");
+
+        // Emoji
+        db.record_visit("/tmp/🎉").unwrap();
+        let rows = db.history_rows().unwrap();
+        assert_eq!(rows.len(), 2);
+
+        // CJK
+        db.record_visit("/tmp/日本語").unwrap();
+        let rows = db.history_rows().unwrap();
+        assert_eq!(rows.len(), 3);
+
+        // Incrementing visits on unicode path
+        db.record_visit("/tmp/日本語").unwrap();
+        let rows = db.history_rows().unwrap();
+        let japanese = rows.iter().find(|r| r.path.contains("日本語")).unwrap();
+        assert_eq!(japanese.visits, 2);
+    }
+
+    #[test]
+    fn canonicalize_path_resolves_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // On non-Unix this test is a no-op
+        #[cfg(not(unix))]
+        let _ = link;
+
+        #[cfg(unix)]
+        {
+            let canonical = canonicalize_path(link.to_str().unwrap()).unwrap();
+            // On macOS /var/folders is a symlink to /private/var/folders
+            let real_canonical = canonicalize_path(real.to_str().unwrap()).unwrap();
+            assert_eq!(canonical, real_canonical);
+        }
+    }
+
+    #[test]
+    fn prune_stale_dry_run_returns_stale_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+        let alive = tmp.path().join("alive");
+        let dead = tmp.path().join("dead");
+        std::fs::create_dir(&alive).unwrap();
+        std::fs::create_dir(&dead).unwrap();
+        // record_visit canonicalizes before storing; pass canonical forms
+        let alive_s = canonicalize_path(alive.to_str().unwrap()).unwrap();
+        let dead_s = canonicalize_path(dead.to_str().unwrap()).unwrap();
+        db.record_visit(&alive_s).unwrap();
+        db.record_visit(&dead_s).unwrap();
+        std::fs::remove_dir(&dead).unwrap();
+
+        let (hist, idx) = db.prune_stale_dry_run().unwrap();
+        assert!(hist.contains(&dead_s), "hist={hist:?}, dead_s={dead_s}",);
+        assert!(!hist.contains(&alive_s));
+        // alive/dead are in history, index is empty
+        assert!(idx.is_empty());
     }
 }

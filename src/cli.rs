@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use crate::completions;
 use crate::config::Config;
-use crate::db::{expand_home, now_secs, Database, HistoryRow};
+use crate::db::{canonicalize_path, expand_home, now_secs, Database, HistoryRow};
 use crate::index;
 use crate::init;
 use crate::picker;
@@ -68,7 +68,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let cfg = Config::load();
+    let (cfg, _) = Config::load_with_warnings();
 
     match args[1].as_str() {
         "p" | "pick" => {
@@ -186,6 +186,8 @@ pub fn run(args: Vec<String>) -> ExitCode {
         }
         "prune" => {
             let dry_run = args.get(2).map(String::as_str) == Some("--dry-run");
+            let quiet = args.get(2).map(String::as_str) == Some("--quiet")
+                || args.get(3).map(String::as_str) == Some("--quiet");
             if dry_run {
                 match db.prune_stale_dry_run() {
                     Ok((history_stale, index_stale)) => {
@@ -214,13 +216,27 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     }
                 }
             } else {
-                match db.prune_stale() {
+                let total_paths = db.history_rows().map(|r| r.len()).unwrap_or(0);
+                let total_index = db.index_rows().map(|r| r.len()).unwrap_or(0);
+                let grand_total = total_paths + total_index;
+
+                if !quiet && grand_total > 0 {
+                    eprintln!("pruning {} entries...", grand_total);
+                }
+
+                match db.prune_stale_batch(256, |done, total| {
+                    if !quiet && total > 0 {
+                        eprintln!("  {} / {}", done, total);
+                    }
+                }) {
                     Ok(removed) => {
-                        println!(
-                            "pruned {} stale entr{}",
-                            removed,
-                            if removed == 1 { "y" } else { "ies" }
-                        );
+                        if !quiet {
+                            println!(
+                                "pruned {} stale entr{}",
+                                removed,
+                                if removed == 1 { "y" } else { "ies" }
+                            );
+                        }
                     }
                     Err(e) => {
                         eprintln!("prune failed: {}", e);
@@ -263,6 +279,20 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     c.indexed,
                     c.top_path.unwrap_or_else(|| "(none)".into())
                 );
+                // Auto-suggest prune if > 20% of history is stale
+                if c.total > 0 {
+                    let stale = db
+                        .history_rows()
+                        .map(|rows| rows.iter().filter(|r| !Path::new(&r.path).is_dir()).count())
+                        .unwrap_or(0);
+                    let pct = (stale as f64 / c.total as f64) * 100.0;
+                    if pct > 20.0 {
+                        println!(
+                            "\n⚠ {:.0}% stale ({} of {}) — run `hop prune` to clean up",
+                            pct, stale, c.total
+                        );
+                    }
+                }
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -459,6 +489,14 @@ fn run_picker_and_print(query: &str) -> ExitCode {
 }
 
 pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
+    // If the query resolves to an existing directory (possibly via symlink),
+    // canonicalize it so we match the canonical path stored in history.
+    if let Some(canonical) = canonicalize_path(query) {
+        if Path::new(&canonical).is_dir() {
+            return Some(canonical);
+        }
+    }
+
     // exact bookmark alias short-circuits
     if let Ok(Some(p)) = db.bookmark_exact(query) {
         if Path::new(&p).is_dir() {
@@ -536,9 +574,11 @@ mod tests {
         db.record_visit(&real.to_string_lossy()).unwrap();
         let cfg = Config::default();
 
+        // record_visit now canonicalizes, so compare via canonical path
+        let expected = canonicalize_path(real.to_str().unwrap()).unwrap();
         assert_eq!(
             find_best(&db, &cfg, "proj").as_deref(),
-            Some(real.to_str().unwrap())
+            Some(expected.as_str())
         );
         // total garbage query → no match
         assert!(find_best(&db, &cfg, "xxxyyyzzz").is_none());

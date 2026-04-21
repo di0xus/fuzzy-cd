@@ -12,7 +12,22 @@ use crossterm::{
 use crate::db::{now_secs, Database};
 use crate::score::{Scored, Scorer, Source};
 
-const VISIBLE_ROWS: usize = 10;
+/// Returns true if the `NO_COLOR` environment variable is set (de-facto standard).
+/// When set to any value, color output should be disabled.
+pub fn no_color() -> bool {
+    std::env::var("NO_COLOR").is_ok()
+}
+
+/// Target number of visible rows. Adapts to terminal height, capped at 20.
+pub fn visible_rows() -> usize {
+    terminal::size()
+        .map(|(_cols, rows)| {
+            // Reserve 4 rows: 1 for query input, 1 blank, 1 for help, 1 buffer
+            let target = rows.saturating_sub(4) as usize;
+            target.clamp(4, 20)
+        })
+        .unwrap_or(10)
+}
 
 pub struct PickerItem {
     pub path: String,
@@ -98,9 +113,10 @@ fn run_loop<W: Write>(
 fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
     let scorer = Scorer::new(now_secs());
     let mut candidates: Vec<Scored> = Vec::new();
+    let limit = visible_rows().max(4) * 2;
 
     if query.is_empty() {
-        if let Ok(rows) = db.recent(VISIBLE_ROWS * 2) {
+        if let Ok(rows) = db.recent(limit) {
             for r in rows {
                 if std::path::Path::new(&r.path).is_dir() {
                     candidates.push(Scored {
@@ -135,7 +151,7 @@ fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
     candidates.dedup_by(|a, b| a.path == b.path);
     candidates
         .into_iter()
-        .take(VISIBLE_ROWS)
+        .take(visible_rows().max(4))
         .map(|c| PickerItem {
             path: c.path,
             source: c.source,
@@ -150,23 +166,32 @@ fn render<W: Write>(
     items: &[PickerItem],
     cursor_idx: usize,
 ) -> io::Result<()> {
+    let nc = no_color();
     out.queue(cursor::MoveTo(0, 0))?
-        .queue(Clear(ClearType::All))?
-        .queue(SetForegroundColor(Color::Cyan))?
-        .queue(Print("› "))?
-        .queue(ResetColor)?
-        .queue(Print(query))?
-        .queue(Print("\r\n"))?;
+        .queue(Clear(ClearType::All))?;
+    if !nc {
+        out.queue(SetForegroundColor(Color::Cyan))?;
+    }
+    out.queue(Print("› "))?;
+    if !nc {
+        out.queue(ResetColor)?;
+    }
+    out.queue(Print(query))?;
+    out.queue(Print("\r\n"))?;
 
     if items.is_empty() {
-        out.queue(SetForegroundColor(Color::DarkGrey))?
-            .queue(Print("  no matches\r\n"))?
-            .queue(ResetColor)?;
+        if !nc {
+            out.queue(SetForegroundColor(Color::DarkGrey))?;
+        }
+        out.queue(Print("  no matches\r\n"))?;
+        if !nc {
+            out.queue(ResetColor)?;
+        }
     }
 
     for (i, item) in items.iter().enumerate() {
         let selected = i == cursor_idx;
-        if selected {
+        if selected && !nc {
             out.queue(SetAttribute(Attribute::Reverse))?;
         }
         let tag = match item.source {
@@ -174,37 +199,50 @@ fn render<W: Write>(
             Source::History => " ",
             Source::Index => "·",
         };
-        out.queue(SetForegroundColor(Color::DarkGrey))?
-            .queue(Print(format!(" {} ", tag)))?
-            .queue(ResetColor)?;
-        if selected {
+        if !nc {
+            out.queue(SetForegroundColor(Color::DarkGrey))?;
+        }
+        out.queue(Print(format!(" {} ", tag)))?;
+        if !nc {
+            out.queue(ResetColor)?;
+        }
+        if selected && !nc {
             out.queue(SetAttribute(Attribute::Reverse))?;
         }
         render_highlighted(out, &item.path, &item.matched_indices)?;
-        if selected {
+        if selected && !nc {
             out.queue(SetAttribute(Attribute::Reset))?;
         }
         out.queue(Print("\r\n"))?;
     }
 
-    out.queue(SetForegroundColor(Color::DarkGrey))?
-        .queue(Print("\r\n  enter select · esc cancel · ↑↓ move\r\n"))?
-        .queue(ResetColor)?;
+    if !nc {
+        out.queue(SetForegroundColor(Color::DarkGrey))?;
+    }
+    out.queue(Print("\r\n  enter select · esc cancel · ↑↓ move\r\n"))?;
+    if !nc {
+        out.queue(ResetColor)?;
+    }
     out.flush()?;
     Ok(())
 }
 
 fn render_highlighted<W: Write>(out: &mut W, path: &str, indices: &[usize]) -> io::Result<()> {
+    let nc = no_color();
     let mut idx_iter = indices.iter().peekable();
     for (i, ch) in path.chars().enumerate() {
         let hit = idx_iter.peek().is_some_and(|&&next| next == i);
         if hit {
             idx_iter.next();
-            out.queue(SetForegroundColor(Color::Yellow))?
-                .queue(SetAttribute(Attribute::Bold))?
-                .queue(Print(ch))?
-                .queue(SetAttribute(Attribute::Reset))?
-                .queue(ResetColor)?;
+            if !nc {
+                out.queue(SetForegroundColor(Color::Yellow))?
+                    .queue(SetAttribute(Attribute::Bold))?;
+            }
+            out.queue(Print(ch))?;
+            if !nc {
+                out.queue(SetAttribute(Attribute::Reset))?
+                    .queue(ResetColor)?;
+            }
         } else {
             out.queue(Print(ch))?;
         }
@@ -280,5 +318,41 @@ mod tests {
             "paths should not be duplicated, got: {:?}",
             paths
         );
+    }
+
+    #[test]
+    fn compute_items_empty_db_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+        // No entries recorded — should not panic
+        let items = compute_items(&db, "");
+        assert!(items.is_empty(), "empty DB should yield no items");
+    }
+
+    #[test]
+    fn no_color_detects_env_var() {
+        // Save original
+        let original = std::env::var("NO_COLOR");
+        std::env::remove_var("NO_COLOR");
+        assert!(!no_color(), "NO_COLOR unset → false");
+
+        std::env::set_var("NO_COLOR", "1");
+        assert!(no_color(), "NO_COLOR=1 → true");
+
+        std::env::set_var("NO_COLOR", "");
+        assert!(no_color(), "NO_COLOR='' → true");
+
+        // Restore
+        match original {
+            Ok(v) => std::env::set_var("NO_COLOR", v),
+            Err(_) => std::env::remove_var("NO_COLOR"),
+        }
+    }
+
+    #[test]
+    fn visible_rows_defaults_without_panic() {
+        let rows = visible_rows();
+        assert!(rows >= 4, "visible_rows should be at least 4");
+        assert!(rows <= 20, "visible_rows should be at most 20");
     }
 }
