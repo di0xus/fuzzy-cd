@@ -1,9 +1,10 @@
 use std::io::{self, Write};
+use std::process::Command;
 use std::time::Duration;
 
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind},
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
     QueueableCommand,
@@ -29,6 +30,18 @@ pub fn visible_rows() -> usize {
         .unwrap_or(10)
 }
 
+/// Returns the current terminal width, or 80 as default.
+pub fn terminal_cols() -> usize {
+    terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(80)
+}
+
+/// Preview pane is shown when terminal width > 120.
+pub fn should_show_preview() -> bool {
+    terminal_cols() > 120
+}
+
 pub struct PickerItem {
     pub path: String,
     pub source: Source,
@@ -46,8 +59,16 @@ pub fn run(db: &Database, initial_query: &str) -> io::Result<Option<String>> {
     stdout.queue(EnterAlternateScreen)?.queue(cursor::Hide)?;
     stdout.flush()?;
 
-    let result = run_loop(&mut stdout, db, initial_query);
+    let mouse_enabled = std::env::var("HOP_MOUSE").is_ok();
+    if mouse_enabled {
+        crossterm::execute!(stdout, crossterm::event::EnableMouseCapture)?;
+    }
 
+    let result = run_loop(&mut stdout, db, initial_query, mouse_enabled);
+
+    if mouse_enabled {
+        let _ = crossterm::execute!(stdout, crossterm::event::DisableMouseCapture);
+    }
     stdout.queue(cursor::Show)?.queue(LeaveAlternateScreen)?;
     stdout.flush()?;
     terminal::disable_raw_mode()?;
@@ -58,18 +79,52 @@ fn run_loop<W: Write>(
     out: &mut W,
     db: &Database,
     initial_query: &str,
+    mouse_enabled: bool,
 ) -> io::Result<Option<String>> {
     let mut query = initial_query.to_string();
     let mut cursor_idx: usize = 0;
     let mut items = compute_items(db, &query);
+    let preview = should_show_preview();
+
+    // Filter mode: when true, typing goes to an explicit filter input at bottom
+    let mut filter_mode = false;
+    let mut filter_buf = String::new();
 
     loop {
-        render(out, &query, &items, cursor_idx)?;
+        render(
+            out,
+            &query,
+            &items,
+            cursor_idx,
+            preview,
+            filter_mode,
+            &filter_buf,
+        )?;
 
         if !event::poll(Duration::from_millis(500))? {
             continue;
         }
         match event::read()? {
+            Event::Key(KeyEvent { code, .. }) if filter_mode => match code {
+                KeyCode::Enter => {
+                    query = filter_buf.clone();
+                    filter_buf.clear();
+                    filter_mode = false;
+                    items = compute_items(db, &query);
+                    cursor_idx = 0;
+                }
+                KeyCode::Esc => {
+                    filter_buf.clear();
+                    filter_mode = false;
+                }
+                KeyCode::Backspace => {
+                    filter_buf.pop();
+                }
+                KeyCode::Char(c) => {
+                    filter_buf.push(c);
+                }
+                _ => {}
+            },
             Event::Key(KeyEvent {
                 code, modifiers, ..
             }) => match (code, modifiers) {
@@ -79,6 +134,10 @@ fn run_loop<W: Write>(
                 (KeyCode::Enter, _) => {
                     return Ok(items.get(cursor_idx).map(|i| i.path.clone()));
                 }
+                (KeyCode::Char('/'), _) => {
+                    filter_mode = true;
+                    filter_buf = query.clone();
+                }
                 (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
                     cursor_idx = cursor_idx.saturating_sub(1);
                 }
@@ -87,7 +146,7 @@ fn run_loop<W: Write>(
                 {
                     cursor_idx += 1;
                 }
-                (KeyCode::Backspace, _) => {
+                (KeyCode::Backspace, _) if !query.is_empty() => {
                     query.pop();
                     items = compute_items(db, &query);
                     cursor_idx = 0;
@@ -101,6 +160,21 @@ fn run_loop<W: Write>(
                     query.push(c);
                     items = compute_items(db, &query);
                     cursor_idx = 0;
+                }
+                _ => {}
+            },
+            Event::Mouse(mouse_event) if mouse_enabled => match mouse_event.kind {
+                MouseEventKind::ScrollDown if cursor_idx + 1 < items.len() => {
+                    cursor_idx += 1;
+                }
+                MouseEventKind::ScrollUp => {
+                    cursor_idx = cursor_idx.saturating_sub(1);
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let click_row = mouse_event.row.saturating_sub(2) as usize;
+                    if click_row < items.len() {
+                        cursor_idx = click_row;
+                    }
                 }
                 _ => {}
             },
@@ -165,19 +239,38 @@ fn render<W: Write>(
     query: &str,
     items: &[PickerItem],
     cursor_idx: usize,
+    preview: bool,
+    filter_mode: bool,
+    filter_buf: &str,
 ) -> io::Result<()> {
     let nc = no_color();
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+
     out.queue(cursor::MoveTo(0, 0))?
         .queue(Clear(ClearType::All))?;
-    if !nc {
-        out.queue(SetForegroundColor(Color::Cyan))?;
+
+    if filter_mode {
+        // Show query in top bar, filter input at bottom
+        if !nc {
+            out.queue(SetForegroundColor(Color::Cyan))?;
+        }
+        out.queue(Print("› "))?;
+        if !nc {
+            out.queue(ResetColor)?;
+        }
+        out.queue(Print(query))?;
+        out.queue(Print(" (filter mode)\r\n"))?;
+    } else {
+        if !nc {
+            out.queue(SetForegroundColor(Color::Cyan))?;
+        }
+        out.queue(Print("› "))?;
+        if !nc {
+            out.queue(ResetColor)?;
+        }
+        out.queue(Print(query))?;
+        out.queue(Print("\r\n"))?;
     }
-    out.queue(Print("› "))?;
-    if !nc {
-        out.queue(ResetColor)?;
-    }
-    out.queue(Print(query))?;
-    out.queue(Print("\r\n"))?;
 
     if items.is_empty() {
         if !nc {
@@ -188,6 +281,12 @@ fn render<W: Write>(
             out.queue(ResetColor)?;
         }
     }
+
+    let _preview_cols = if preview {
+        (cols / 2).saturating_sub(1)
+    } else {
+        0
+    };
 
     for (i, item) in items.iter().enumerate() {
         let selected = i == cursor_idx;
@@ -213,13 +312,42 @@ fn render<W: Write>(
         if selected && !nc {
             out.queue(SetAttribute(Attribute::Reset))?;
         }
+        if preview && selected {
+            // Right pane: ls output
+            out.queue(Print("  "))?;
+            if let Ok(output) = Command::new("ls")
+                .arg("-la")
+                .arg("--color=always")
+                .arg("--")
+                .arg(&item.path)
+                .output()
+            {
+                let ls_out = String::from_utf8_lossy(&output.stdout);
+                for line in ls_out.lines().take((rows as usize).saturating_sub(6)) {
+                    out.queue(Print(line))?;
+                    out.queue(Print("\r\n"))?;
+                }
+            }
+        }
         out.queue(Print("\r\n"))?;
     }
 
     if !nc {
         out.queue(SetForegroundColor(Color::DarkGrey))?;
     }
-    out.queue(Print("\r\n  enter select · esc cancel · ↑↓ move\r\n"))?;
+    if filter_mode {
+        // Show filter input at bottom
+        out.queue(Print("\r\nfilter: "))?;
+        out.queue(Print(filter_buf))?;
+        out.queue(Print("  (enter confirm · esc cancel)"))?;
+    } else {
+        out.queue(Print(
+            "\r\n  enter select · esc cancel · / filter · ↑↓ move",
+        ))?;
+        if preview {
+            out.queue(Print(" · preview (w>120)"))?;
+        }
+    }
     if !nc {
         out.queue(ResetColor)?;
     }

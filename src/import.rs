@@ -186,6 +186,150 @@ fn is_existing_dir(p: &PathBuf) -> bool {
     fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false)
 }
 
+/// autojump "~/.local/share/autojump/autojump.txt" — one line per dir:
+/// `weight\tpath`
+pub fn import_autojump(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
+    let content = fs::read_to_string(path)?;
+    let mut stats = ImportStats {
+        imported: 0,
+        skipped: 0,
+    };
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, '\t');
+        let raw_path = parts.next().unwrap_or("").trim();
+        if raw_path.is_empty() {
+            stats.skipped += 1;
+            continue;
+        }
+        let weight: f64 = parts
+            .next()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(1.0);
+        let abs = expand_home(raw_path);
+        if is_existing_dir(&abs) {
+            // Record visit once per autojump weight bucket (1-100 → 1-10 visits)
+            let visits = (weight.clamp(1.0, 100.0) / 10.0) as i32;
+            let as_str = abs.to_string_lossy();
+            for _ in 0..visits.max(1) {
+                db.record_visit(&as_str).ok();
+            }
+            stats.imported += 1;
+        } else {
+            stats.skipped += 1;
+        }
+    }
+    Ok(stats)
+}
+
+/// zoxide "~/.local/share/zoxide/db.zo" — msgpack format.
+/// Each entry is an array: [path (str), score (f64), ...]
+pub fn import_zoxide(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
+    let data = fs::read(path)?;
+    let mut stats = ImportStats {
+        imported: 0,
+        skipped: 0,
+    };
+
+    // Try to decode as an array of [path, score] arrays
+    use rmp_serde::Deserializer;
+    use serde::Deserialize;
+    #[derive(Debug, Deserialize)]
+    struct ZoxideEntry(String, f64);
+
+    let mut deser = Deserializer::new(&data[..]);
+    if let Ok(entries) = Vec::<ZoxideEntry>::deserialize(&mut deser) {
+        for entry in entries {
+            let abs = expand_home(&entry.0);
+            if is_existing_dir(&abs) {
+                let visits = (entry.1.clamp(1.0, 100.0) / 10.0) as i32;
+                let as_str = abs.to_string_lossy();
+                for _ in 0..visits.max(1) {
+                    db.record_visit(&as_str).ok();
+                }
+                stats.imported += 1;
+            } else {
+                stats.skipped += 1;
+            }
+        }
+    } else {
+        // Fallback: simple string array
+        let mut deser2 = Deserializer::new(&data[..]);
+        if let Ok(paths) = Vec::<String>::deserialize(&mut deser2) {
+            for raw_path in paths {
+                let abs = expand_home(&raw_path);
+                if is_existing_dir(&abs) {
+                    db.record_visit(&abs.to_string_lossy()).ok();
+                    stats.imported += 1;
+                } else {
+                    stats.skipped += 1;
+                }
+            }
+        }
+    }
+    Ok(stats)
+}
+
+/// thefuck alias import — parses shell alias lines from a file and offers
+/// directories mentioned in alias targets as bookmarks.
+/// Looks for `alias <name>='cd <path>'` or `alias <name>="cd <path>"` patterns.
+pub fn import_thefuck(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
+    let content = fs::read_to_string(path)?;
+    let mut stats = ImportStats {
+        imported: 0,
+        skipped: 0,
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("alias ") {
+            continue;
+        }
+        let after_alias = match trimmed.strip_prefix("alias ") {
+            Some(s) => s,
+            None => continue,
+        };
+        // Parse alias name=expression
+        let (alias, expr) = match after_alias.split_once('=') {
+            Some((a, e)) => (a, e),
+            None => continue,
+        };
+        // Strip quotes from expression
+        let expr = expr.trim_matches(|c| c == '\'' || c == '"');
+        // Look for cd or pushd targets
+        if let Some(target) = extract_cd_target_from_alias_expr(expr) {
+            let abs = expand_home(&target);
+            if is_existing_dir(&abs) {
+                // Register as a bookmark with the alias name
+                let alias_clean = alias.trim();
+                if !alias_clean.is_empty() {
+                    db.set_bookmark(alias_clean, &abs.to_string_lossy()).ok();
+                    stats.imported += 1;
+                }
+            } else {
+                stats.skipped += 1;
+            }
+        }
+    }
+    Ok(stats)
+}
+
+/// Extract cd/pushd path from a thefuck alias expression like `cd /path`
+fn extract_cd_target_from_alias_expr(expr: &str) -> Option<String> {
+    let tokens: Vec<&str> = expr.split_whitespace().collect();
+    let mut it = tokens.iter();
+    let verb = it.next()?;
+    if *verb != "cd" && *verb != "pushd" {
+        return None;
+    }
+    let arg = it.next()?;
+    if arg.starts_with('-') || arg.contains('$') || arg.contains('`') {
+        return None;
+    }
+    Some(arg.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,8 +7,9 @@ use crate::db::{canonicalize_path, expand_home, now_secs, Database, HistoryRow};
 use crate::index;
 use crate::init;
 use crate::picker;
-use crate::score::{Scored, Scorer};
+use crate::score::{ScoreBreakdown, Scored, Scorer};
 use crate::{doctor, import};
+use serde_json;
 
 pub const HELP: &str = r#"hop — smart directory jump
 
@@ -24,12 +25,17 @@ Usage:
     hop history [n]              Top n by visits (default 20)
     hop recent [n]               Last n visited (default 20)
     hop top                      Top 10.
-    hop import fasd|zsh <file>    Import from another tool.
+    hop score <query>            Show per-component score breakdown
+    hop score <query> --json     Same, JSON output
+    hop list <query> [--limit N] [--json]  List all scored matches
+    hop export [--format json|csv|tsv]  Dump history/bookmarks
+    hop import fasd|autojump|zoxide|thefuck <file>  Import from another tool
     hop prune [--dry-run]         Remove stale (deleted) paths
     hop clear [--force]           Wipe history (prompts by default)
     hop stats                    DB stats.
     hop reindex                  Rebuild filesystem index
     hop doctor                   Diagnose setup
+    hop update [--dry-run]       Self-update to latest release
     hop init <bash|zsh|fish>     Emit shell integration
     hop init --shell <shell>     Same, with explicit flag
     hop init --verify            Check shell integration
@@ -147,6 +153,47 @@ pub fn run(args: Vec<String>) -> ExitCode {
             print_rows(&Database::filter_live_rows(rows));
             ExitCode::SUCCESS
         }
+        "score" => {
+            let query = args[2..]
+                .iter()
+                .map(String::as_str)
+                .filter(|s| *s != "--")
+                .collect::<Vec<_>>()
+                .join(" ");
+            let is_json = args.iter().any(|a| a == "--json");
+            if query.is_empty() {
+                eprintln!("Usage: hop score <query> [--json]");
+                return ExitCode::from(2);
+            }
+            cmd_score(&db, &cfg, &query, is_json)
+        }
+        "list" => {
+            let query = args[2..]
+                .iter()
+                .map(String::as_str)
+                .filter(|s| *s != "--")
+                .collect::<Vec<_>>()
+                .join(" ");
+            let is_json = args.iter().any(|a| a == "--json");
+            let limit = args
+                .iter()
+                .position(|a| a == "--limit")
+                .and_then(|i| args.get(i + 1)?.parse().ok())
+                .unwrap_or(20);
+            cmd_list(&db, &cfg, &query, limit, is_json)
+        }
+        "export" => {
+            let format = args
+                .iter()
+                .position(|a| a == "--format")
+                .and_then(|i| args.get(i + 1).cloned())
+                .unwrap_or_else(|| "json".to_string());
+            cmd_export(&db, &format)
+        }
+        "update" => {
+            let dry_run = args.get(2).map(String::as_str) == Some("--dry-run");
+            cmd_update(dry_run)
+        }
         "top" => {
             let rows = db.top(10).unwrap_or_default();
             print_rows(&Database::filter_live_rows(rows));
@@ -160,13 +207,16 @@ pub fn run(args: Vec<String>) -> ExitCode {
         }
         "import" => {
             if args.len() < 4 {
-                eprintln!("Usage: hop import <fasd|zsh> <file>");
+                eprintln!("Usage: hop import <fasd|autojump|zoxide|thefuck> <file>");
                 return ExitCode::from(2);
             }
             let source = args[2].as_str();
             let file = Path::new(&args[3]);
             let result = match source {
                 "fasd" => import::import_fasd(&db, file),
+                "autojump" => import::import_autojump(&db, file),
+                "zoxide" => import::import_zoxide(&db, file),
+                "thefuck" => import::import_thefuck(&db, file),
                 "zsh" => import::import_zsh(&db, file),
                 _ => {
                     eprintln!("unknown source: {}", source);
@@ -557,6 +607,265 @@ fn row_display(r: &HistoryRow) -> String {
 fn print_rows(rows: &[HistoryRow]) {
     for r in rows {
         println!("{:4} visits   {}", r.visits, r.path);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v0.8: score, list, export, update
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCode {
+    let scorer = Scorer::new(now_secs());
+    let mut breakdowns: Vec<ScoreBreakdown> = Vec::new();
+
+    // exact bookmark first
+    if let Ok(Some(p)) = db.bookmark_exact(query) {
+        if Path::new(&p).is_dir() {
+            if let Some(b) = scorer.score_bookmark_breakdown(query, &p, query) {
+                breakdowns.push(b);
+            }
+        }
+    }
+
+    // score bookmarks
+    if let Ok(bms) = db.bookmarks() {
+        for (alias, path) in bms {
+            if let Some(b) = scorer.score_bookmark_breakdown(&alias, &path, query) {
+                if Path::new(&b.path).is_dir() && b.total > cfg.min_score {
+                    breakdowns.push(b);
+                }
+            }
+        }
+    }
+
+    // score history
+    if let Ok(rows) = db.history_rows() {
+        for r in rows {
+            if let Some(b) = scorer.score_history_breakdown(&r, query) {
+                if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
+                    breakdowns.push(b);
+                }
+            }
+        }
+    }
+
+    // fallback index only if best is weak
+    let best_history = breakdowns.iter().map(|b| b.total).max().unwrap_or(0);
+    if best_history < cfg.min_score * 2 {
+        if let Ok(paths) = db.index_rows() {
+            for p in paths {
+                if let Some(b) = scorer.score_indexed_breakdown(&p, query) {
+                    if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
+                        breakdowns.push(b);
+                    }
+                }
+            }
+        }
+    }
+
+    breakdowns.sort_by_key(|b| std::cmp::Reverse(b.total));
+    breakdowns.dedup_by(|a, b| a.path == b.path);
+
+    if breakdowns.is_empty() {
+        return ExitCode::from(1);
+    }
+
+    if is_json {
+        // Print top 10 as JSON
+        let tops: Vec<_> = breakdowns
+            .iter()
+            .take(10)
+            .map(|b| {
+                serde_json::json!({
+                    "path": b.path,
+                    "total": b.total,
+                    "fuzzy": b.fuzzy,
+                    "visits": b.visits,
+                    "recency": b.recency,
+                    "git": b.git,
+                    "basename": b.basename,
+                    "shortness": b.shortness,
+                    "source": format!("{:?}", b.source).to_lowercase(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&tops).unwrap());
+    } else {
+        // Human-readable per-component breakdown
+        println!("query: {}", query);
+        println!();
+        for (i, b) in breakdowns.iter().take(10).enumerate() {
+            let trophy = if i == 0 { " (best)" } else { "" };
+            println!(
+                "{}{}  total={:>4}  fuzzy={:>3}  visits={:>3}  recency={:>2}  git={:>2}  basename={:>2}  shortness={:>2}  [{:?}]",
+                b.path,
+                trophy,
+                b.total,
+                b.fuzzy,
+                b.visits,
+                b.recency,
+                b.git,
+                b.basename,
+                b.shortness,
+                b.source,
+            );
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_list(db: &Database, cfg: &Config, query: &str, limit: usize, is_json: bool) -> ExitCode {
+    let scorer = Scorer::new(now_secs());
+    let mut scored: Vec<Scored> = Vec::new();
+
+    if let Ok(bms) = db.bookmarks() {
+        for (alias, path) in bms {
+            if let Some(s) = scorer.score_bookmark(&alias, &path, query) {
+                if Path::new(&s.path).is_dir() {
+                    scored.push(s);
+                }
+            }
+        }
+    }
+
+    if let Ok(rows) = db.history_rows() {
+        for r in rows {
+            if let Some(s) = scorer.score_history(&r, query) {
+                if Path::new(&s.path).is_dir() {
+                    scored.push(s);
+                }
+            }
+        }
+    }
+
+    let best_history = scored.iter().map(|c| c.score).max().unwrap_or(0);
+    if best_history < cfg.min_score * 2 {
+        if let Ok(paths) = db.index_rows() {
+            for p in paths {
+                if let Some(s) = scorer.score_indexed(&p, query) {
+                    if Path::new(&s.path).is_dir() {
+                        scored.push(s);
+                    }
+                }
+            }
+        }
+    }
+
+    scored.sort_by_key(|c| std::cmp::Reverse(c.score));
+    scored.dedup_by(|a, b| a.path == b.path);
+    scored.truncate(limit);
+
+    if scored.is_empty() {
+        return ExitCode::from(1);
+    }
+
+    if is_json {
+        let items: Vec<_> = scored
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "path": s.path,
+                    "score": s.score,
+                    "source": format!("{:?}", s.source).to_lowercase(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items).unwrap());
+    } else {
+        for s in &scored {
+            println!("{}\t{}\t{:?}", s.score, s.path, s.source);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_export(db: &Database, format: &str) -> ExitCode {
+    let history = db.history_rows().unwrap_or_default();
+    let bookmarks = db.bookmarks().unwrap_or_default();
+
+    match format {
+        "json" => {
+            let payload = serde_json::json!({
+                "version": 1,
+                "exported_at": now_secs(),
+                "history": history.iter().map(|r| {
+                    serde_json::json!({
+                        "path": r.path,
+                        "visits": r.visits,
+                        "last_visited": r.last_visited,
+                        "is_git_repo": r.is_git_repo,
+                    })
+                }).collect::<Vec<_>>(),
+                "bookmarks": bookmarks.iter().map(|(alias, path)| {
+                    serde_json::json!({
+                        "alias": alias,
+                        "path": path,
+                    })
+                }).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        }
+        "csv" => {
+            println!("type,alias_or_path,visits,last_visited,is_git_repo");
+            for r in &history {
+                println!(
+                    "history,{},{},{},{}",
+                    r.path, r.visits, r.last_visited, r.is_git_repo
+                );
+            }
+            for (alias, path) in &bookmarks {
+                println!("bookmark,{}:{},0,0,false", alias, path);
+            }
+        }
+        "tsv" => {
+            for r in &history {
+                println!(
+                    "history\t{}\t{}\t{}\t{}",
+                    r.path, r.visits, r.last_visited, r.is_git_repo
+                );
+            }
+            for (alias, path) in &bookmarks {
+                println!("bookmark\t{}:{}\t0\t0\tfalse", alias, path);
+            }
+        }
+        _ => {
+            eprintln!("unknown format '{}': use json, csv, or tsv", format);
+            return ExitCode::from(2);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_update(dry_run: bool) -> ExitCode {
+    // Fetch latest release info from GitHub API
+    let url = "https://api.github.com/repos/di0xus/hop/releases/latest";
+    let client = ureq::Agent::new();
+    match client.get(url).call() {
+        Ok(resp) => {
+            if resp.status() != 200 {
+                eprintln!("failed to fetch releases: HTTP {}", resp.status());
+                return ExitCode::from(1);
+            }
+            let body = resp.into_string().unwrap();
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let tag = body["tag_name"].as_str().unwrap_or("unknown");
+            let current = env!("CARGO_PKG_VERSION");
+            if tag == current {
+                println!("already at latest version: {}", current);
+                return ExitCode::SUCCESS;
+            }
+            println!("latest: {}  current: {}", tag, current);
+            if dry_run {
+                println!("(dry-run) would download and install {}", tag);
+            } else {
+                println!("run without --dry-run to install");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("update check failed: {}", e);
+            ExitCode::from(1)
+        }
     }
 }
 
