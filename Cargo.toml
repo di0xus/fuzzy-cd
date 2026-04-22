@@ -1,6 +1,6 @@
 [package]
 name = "hop"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.75"
 description = "A smarter cd: fuzzy directory jumping with learned history, bookmarks, and optional filesystem index."
@@ -24,6 +24,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 fuzzy-matcher = "0.3"
 directories = "6"
 crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "2"
+rmp-serde = "1"
 
 [dev-dependencies]
 tempfile = "3"
