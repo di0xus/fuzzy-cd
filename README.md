@@ -1,45 +1,41 @@
 # hop
 
-A smarter `cd` for your terminal. Type a scrap of a directory name and it
-jumps you to the right place.
+**A smarter `cd` for your terminal.**
+
+Type a fragment of a directory name — `cd work` — and hop jumps you to the best match from your history. No more `cd ../../../long/path`. It learns where you go and gets better over time.
 
 ```
-~ $ cd hop
-~/hop $
-
 ~ $ cd dl
 ~/Downloads $
 
-~/Downloads $ cd work
-~/code/work $
+~/Downloads $ cd proj
+~/code/work/projects $
 ```
-
-No more `cd ../../../some/long/path`. It learns where you go and remembers.
 
 ---
 
-## Why you want this
+## Features
 
-- **Fewer keystrokes.** `cd proj` instead of `cd ~/code/work/projects/the-one`.
-- **It remembers.** The more you visit a folder, the faster it finds it.
-- **It still works like `cd`.** Typing a real path (`cd ~/Downloads`) behaves
-  exactly like before. No surprises.
-- **Fast.** Local SQLite lookup, runs in under 10 ms.
-- **Yours.** Data lives on your machine, nothing goes anywhere.
+- **Fuzzy matching** — `cd work`, `cd 444`, `cd abc` all work. Matches against visit frequency, recency, and bookmark priority.
+- **Bookmarks** — name your frequent directories with short aliases.
+- **Smart ranking** — the more you visit a folder, the higher it scores. Recent visits beat old ones.
+- **Import existing history** — pull in your zsh, fasd, autojump, zoxide, or thefuck history on first run.
+- **Interactive picker** — `hop` with no args opens a searchable picker with arrow keys.
+- **Self-updating** — `hop update` fetches the latest release from GitHub.
+- **Shell-agnostic** — works with Fish, Zsh, and Bash.
+- **Private** — all data stays on your machine. SQLite only.
 
 ---
 
 ## Install
 
-One command, no Rust required:
+### One-liner (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/di0xus/hop/main/install.sh | bash
 ```
 
-The script downloads the latest binary for your platform (`linux x86_64`,
-`linux aarch64`, `macos x86_64`, or `macos aarch64`), places it in
-`~/.local/bin`, and tells you if you need to add that to your `PATH`.
+Downloads the latest binary for your platform, places it in `~/.local/bin`, and prints instructions if you need to add that to your `PATH`.
 
 ### From source (requires Rust)
 
@@ -49,221 +45,216 @@ cd hop
 cargo install --path .
 ```
 
-### Hook it into your shell
+---
 
-Pick your shell and add one line.
+## Shell setup
 
-**Fish** — edit `~/.config/fish/config.fish`:
+Restart your shell after installing, then run the init command for your shell:
 
+**Fish** (`~/.config/fish/config.fish`):
 ```fish
 hop init fish | source
 ```
 
-**Zsh** — edit `~/.zshrc`:
-
+**Zsh** (`~/.zshrc`):
 ```zsh
 eval "$(hop init zsh)"
 ```
 
-**Bash** — edit `~/.bashrc`:
-
+**Bash** (`~/.bashrc`):
 ```bash
 eval "$(hop init bash)"
 ```
 
-Restart your shell (`exec fish`, `exec zsh`, etc.). That's it. `cd` is now
-smart.
+That's it — `cd` is now smart. Every directory change is recorded automatically.
 
 ---
 
-## How it works (the short version)
+## Usage
 
-1. Every time you `cd` somewhere, the shell quietly tells `hop`:
-   *"we just went to `/Users/you/code/work`."*
-2. `hop` writes it down, counts how often you visit, notes when you were
-   last there.
-3. Next time you type `cd work`, it looks through everywhere you've been,
-   scores each candidate, and picks the winner.
-
-You don't have to teach it anything. Use `cd` normally for a few days and
-it'll know your workflow.
-
----
-
-## Everyday use
+### Navigate
 
 ```bash
-cd proj          # jump to best match for "proj"
-cd /tmp          # real paths still work
-cd ..            # so do the classics
+cd proj          # fuzzy match against your history
+cd /tmp          # real paths work as-is
+cd ..            # classics too
 cd -             # previous directory
-hop              # open an interactive picker (arrow keys + enter)
+hop              # open the interactive picker
+hop pick         # same as above (shortcut: hop p)
 ```
 
-### Bookmarks for the places you live in
-
-Got a folder you visit ten times a day? Give it a short alias.
+### Add and remove
 
 ```bash
-hop book work ~/code/work
-hop book dot  ~/.config
-
-cd work          # takes you straight there, every time
-cd dot
+hop add ~/code/project      # manually record a visit
+hop rm ~/old/project        # remove from history
+hop forget ~/old/project     # alias for rm
+hop clear                    # wipe all history (asks for confirm)
+hop clear --force            # wipe without asking
 ```
 
-List or remove them:
+### Bookmarks
 
 ```bash
-hop book list
-hop book rm work
+hop book work ~/code/work    # create a bookmark
+hop book dot ~/.config       # short alias for a config dir
+
+cd work                     # bookmark short-circuits fuzzy matching
+hop book list               # see all bookmarks
+hop book rm work            # delete a bookmark
 ```
 
-### Seed it from your old history
-
-If you were already using zsh or
-[fasd](https://github.com/clvv/fasd), import that history so `hop` starts
-smart on day one:
+### History and search
 
 ```bash
-hop import zsh  ~/.zsh_history
+hop recent                  # last 20 visited directories
+hop history                 # top 20 by visit count
+hop list proj               # list all entries matching "proj"
+hop score proj              # show why a query scored the way it did
+hop explain proj            # fuzzy breakdown + scores
+```
+
+### Import
+
+Seed hop with your existing shell history on first install:
+
+```bash
+hop import zsh ~/.zsh_history
 hop import fasd ~/.fasd
-```
-
-### Peek inside
-
-```bash
-hop stats        # summary
-hop recent       # last 20 places you've been
-hop history      # top 20 by visit count
-hop doctor       # sanity check the setup
+hop import autojump ~/.local/share/autojump/autojump.txt
+hop import zoxide ~/.local/share/zoxide/data.zzz
+hop import thefuck ~/.thefuck_config
 ```
 
 ### Housekeeping
 
 ```bash
-hop prune        # forget directories that no longer exist
-hop rm /path     # forget one specific path
-hop clear        # wipe the slate clean
+hop prune                   # remove entries pointing to deleted directories
+hop prune --dry-run         # preview what would be removed (no changes made)
+hop prune --quiet           # suppress output on success
+hop update                  # check GitHub for a new release and upgrade
+hop doctor                  # sanity-check your install
+```
+
+### Export
+
+```bash
+hop export                  # dump everything as JSON
+hop export --format csv    # or CSV
+hop export --format tsv    # or TSV
+```
+
+### Shell completions
+
+```bash
+hop completions fish > ~/.config/fish/completions/hop.fish
+hop completions zsh > ~/.zfunc/_hop
+hop completions bash > /usr/local/etc/bash_completion.d/hop
 ```
 
 ---
 
-## The interactive picker
+## Configuration
 
-Running `hop` with no arguments opens a mini picker:
-
-```
-› proj
- ★ /Users/you/code/work/projects
-   /Users/you/side-projects/old
-   /Users/you/projects-archive
-```
-
-- Type to filter live.
-- `↑` `↓` to move, `Enter` to pick.
-- `Esc` or `Ctrl-C` to back out.
-- `Ctrl-U` to clear, `Backspace` to edit.
-
-The `★` marks bookmarks.
-
----
-
-## Tuning (optional)
-
-Create `~/Library/Application Support/hop/config.toml` if you want to
-customize things:
+Create `~/Library/Application Support/hop/config.toml` (macOS) or `~/.config/hop/config.toml` (Linux) to customize:
 
 ```toml
-# Folders that get scanned during `hop reindex`
+# Directories scanned during `hop reindex`
 index_roots = ["~/code", "~/work"]
 
-# Folders to skip during indexing
-skip_dirs = ["node_modules", "target", ".venv"]
+# Skip these during indexing (not during normal cd)
+skip_dirs = ["node_modules", "target", ".venv", ".git"]
 
-# How deep to walk
+# How deep to walk subdirectories during reindex
 max_depth = 6
 
-# Reject matches below this score (higher = stricter)
+# Reject fuzzy matches below this score (higher = stricter)
 min_score = 20
+
+# Prune stale entries on startup automatically (0 = disabled)
+auto_prune_on_startup = 0
 ```
 
-Then run `hop reindex` to build a filesystem index, which kicks in as a
-fallback when your history doesn't yet know a folder.
+Then run `hop reindex` to build the filesystem index.
+
+---
+
+## All commands
+
+| Command | Description |
+|---|---|
+| `hop [query]` | Interactive picker; with query, fuzzy jumps directly |
+| `hop add <path>` | Manually record a visit |
+| `hop rm <path>` | Remove a path from history |
+| `hop book [alias] [path]` | Set or resolve a bookmark |
+| `hop book list` | List all bookmarks |
+| `hop book rm <alias>` | Delete a bookmark |
+| `hop history` | Top 20 by visit count |
+| `hop recent` | Last 20 visited |
+| `hop list [query]` | List all entries matching query |
+| `hop score <query>` | Show score breakdown |
+| `hop explain <query>` | Explain fuzzy match reasoning + scores |
+| `hop top` | Alias for `hop history` |
+| `hop prune [--dry-run] [--quiet]` | Remove stale entries; `--dry-run` previews, `--quiet` silences output |
+| `hop clear [--force]` | Wipe all history and bookmarks |
+| `hop stats [--verbose]` | Show database statistics |
+| `hop import <type> <file>` | Import from zsh/fasd/autojump/zoxide/thefuck |
+| `hop export [--format json\|csv\|tsv]` | Dump history and bookmarks |
+| `hop update` | Check for and install a new release |
+| `hop reindex` | Rebuild the filesystem index |
+| `hop doctor` | Verify installation |
+| `hop init <shell>` | Print shell integration snippet |
+| `hop completions <shell>` | Print completions for the shell |
+
+---
+
+## Data storage
+
+All data lives in a single SQLite database:
+
+- **macOS**: `~/Library/Application Support/hop/hop.db`
+- **Linux**: `~/.local/share/hop/hop.db`
+
+The database has four tables: your visit history, bookmarks, an optional filesystem index, and schema metadata. That's it.
+
+To back up or migrate: copy the `.db` file. Everything comes with you.
 
 ---
 
 ## Upgrading from `fuzzy-cd`
 
-If you used the previous `fuzzy-cd` name: on first run, `hop` copies your
-old database from `~/Library/Application Support/fuzzy-cd/` into the new
-location automatically. Your history and bookmarks come with you.
+If you previously used the `fuzzy-cd` binary: hop automatically imports your old database from `~/Library/Application Support/fuzzy-cd/` on first run. Your history and bookmarks are preserved.
 
-Old shell integration still calls `fuzzy-cd`, so replace that block with
-`hop init <shell> | source` (or `eval`) and restart the shell.
+Update your shell config from `fuzzy-cd init ...` to `hop init <shell> | source` (or `eval`), then restart the shell.
 
 ---
 
 ## Troubleshooting
 
 **"It doesn't find the folder I want."**
-`cd` into it the old-fashioned way a few times (full path). After a few
-visits, fuzzy matching will pick it up. Or bookmark it.
+`cd` into it the normal way a few times. Hop learns from visits. Or bookmark it directly: `hop book myproj ~/code/myproject`.
 
 **"Wrong folder keeps winning."**
-Tell it to forget the wrong one:
-
+Remove it from history:
 ```bash
 hop rm /path/to/wrong/folder
 ```
 
-**"Is it working at all?"**
-
+**"Is it working?"**
 ```bash
 hop doctor
 ```
-
-Should show `✓` everywhere. If not, reload your shell and try again.
+Should print `✓` for each check.
 
 **"I broke it."**
-Delete the database and start over — no harm done:
-
+No problem. Reset:
+```bash
+hop clear --force
+```
+Or delete everything and start fresh:
 ```bash
 rm -rf ~/Library/Application\ Support/hop
 ```
-
----
-
-## What it stores
-
-One SQLite file at `~/Library/Application Support/hop/hop.db`. Four tables:
-paths you've visited, bookmarks, an optional folder index, and schema
-metadata. That's it.
-
-Backup-safe: copy the `.db` to a new machine and your history comes with
-you.
-
----
-
-## FAQ
-
-**Does it slow down my shell?**
-No. The hook is a single `sqlite` insert that runs after `cd`. Takes a
-couple of milliseconds.
-
-**Will it mess with my existing `cd`?**
-If you type a real directory path, it behaves exactly like `cd`. The
-smarts only kick in when the argument isn't a real path.
-
-**Does it follow symlinks, hidden folders, network mounts…?**
-It records wherever `cd` successfully takes you — symlinks included. It
-ignores nothing by default (the skip list is only for the optional
-filesystem index).
-
-**Can I uninstall?**
-Yes. Remove the `hop init ...` line from your shell config, restart the
-shell, and `cargo uninstall hop`. Delete
-`~/Library/Application Support/hop` if you want the DB gone too.
 
 ---
 
