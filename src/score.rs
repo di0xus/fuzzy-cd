@@ -297,7 +297,7 @@ pub fn classify_query(query: &str) -> (&str, bool, bool) {
 fn path_matches_pattern(path: &str, pattern: &str, is_regex: bool) -> bool {
     if is_regex {
         let re = Regex::new(pattern).ok();
-        re.map_or(false, |r| r.is_match(path))
+        re.is_some_and(|r| r.is_match(path))
     } else {
         path.to_lowercase().contains(&pattern.to_lowercase())
     }
