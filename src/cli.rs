@@ -108,45 +108,49 @@ pub fn run(args: Vec<String>) -> ExitCode {
             }
         }
         "add" => {
-            let path_arg = args.get(2);
-            let dry_run = args.get(3).map(String::as_str) == Some("--dry-run")
-                || (path_arg == Some(&"--dry-run".to_string()));
-            let path_str = if dry_run && path_arg == Some(&"--dry-run".to_string()) {
-                // hop add --dry-run with no path
-                args.get(3).or(args.get(2))
-            } else if path_arg == Some(&"--dry-run".to_string()) {
+            // Parse arguments: handles hop add <path>, hop add --dry-run <path>, hop add <path> --dry-run
+            let dry_run = args[2..].iter().any(|a| a == "--dry-run");
+
+            let arg = if args.len() >= 4 && args[2] == "--dry-run" {
                 // hop add --dry-run <path>
                 args.get(3)
+            } else if args.len() >= 5 && args[3] == "--dry-run" {
+                // hop add <path> --dry-run
+                args.get(2)
             } else {
-                path_arg
+                // hop add <path>
+                args.get(2)
             };
-            let Some(arg) = path_str else {
+
+            let Some(raw_arg) = arg else {
                 eprintln!("Usage: hop add <path> [--dry-run]");
                 return ExitCode::from(2);
             };
-            let path = expand_home(arg);
+
+            let path = expand_home(raw_arg);
             if !path.is_dir() {
                 eprintln!("not a directory: {}", path.display());
                 return ExitCode::from(1);
             }
+
+            // Canonicalize so we check/use the stored form
+            let canon = canonicalize_path(&path.to_string_lossy())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+
             if dry_run {
                 // Check if entry exists to determine "would add" vs "would create"
                 let existing = db
                     .history_rows()
                     .ok()
-                    .and_then(|rows| rows.into_iter().find(|r| r.path == path.to_string_lossy()));
+                    .and_then(|rows| rows.into_iter().find(|r| r.path == canon));
                 if let Some(row) = existing {
-                    println!(
-                        "would add {} with {} visits",
-                        path.display(),
-                        row.visits + 1
-                    );
+                    println!("would add {} with {} visits", canon, row.visits + 1);
                 } else {
-                    println!("would create new entry: {}", path.display());
+                    println!("would create new entry: {}", canon);
                 }
                 return ExitCode::SUCCESS;
             }
-            let _ = db.record_visit(&path.to_string_lossy());
+            let _ = db.record_visit(&canon);
             ExitCode::SUCCESS
         }
         "rm" => {
@@ -245,31 +249,63 @@ pub fn run(args: Vec<String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         "import" => {
-            if args.len() < 4 {
-                eprintln!("Usage: hop import <fasd|autojump|zoxide|thefuck> <file>");
+            // Check for --dry-run flag (can appear before or after source)
+            let dry_run = args[2..].iter().any(|a| a == "--dry-run");
+            let source;
+            let file;
+
+            if args.len() >= 4 && args[2] == "--dry-run" {
+                // hop import --dry-run <source> <file>
+                source = args[3].as_str();
+                file = Path::new(&args[4]);
+            } else if args.len() >= 5 && args[3] == "--dry-run" {
+                // hop import <source> --dry-run <file>
+                source = args[2].as_str();
+                file = Path::new(&args[4]);
+            } else if args.len() >= 4 {
+                source = args[2].as_str();
+                file = Path::new(&args[3]);
+            } else {
+                eprintln!("Usage: hop import [--dry-run] <fasd|autojump|zoxide|thefuck> <file>");
                 return ExitCode::from(2);
-            }
-            let source = args[2].as_str();
-            let file = Path::new(&args[3]);
-            let result = match source {
-                "fasd" => import::import_fasd(&db, file),
-                "autojump" => import::import_autojump(&db, file),
-                "zoxide" => import::import_zoxide(&db, file),
-                "thefuck" => import::import_thefuck(&db, file),
-                "zsh" => import::import_zsh(&db, file),
-                _ => {
-                    eprintln!("unknown source: {}", source);
-                    return ExitCode::from(2);
-                }
             };
-            match result {
-                Ok(stats) => {
-                    println!("imported {}, skipped {}", stats.imported, stats.skipped);
-                    ExitCode::SUCCESS
+
+            if dry_run {
+                match import::import_dry_run(source, file) {
+                    Ok(preview) => {
+                        println!(
+                            "would import {} entries: {}",
+                            preview.len(),
+                            preview.join(", ")
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("import dry-run failed: {}", e);
+                        ExitCode::from(1)
+                    }
                 }
-                Err(e) => {
-                    eprintln!("import failed: {}", e);
-                    ExitCode::from(1)
+            } else {
+                let result = match source {
+                    "fasd" => import::import_fasd(&db, file),
+                    "autojump" => import::import_autojump(&db, file),
+                    "zoxide" => import::import_zoxide(&db, file),
+                    "thefuck" => import::import_thefuck(&db, file),
+                    "zsh" => import::import_zsh(&db, file),
+                    _ => {
+                        eprintln!("unknown source: {}", source);
+                        return ExitCode::from(2);
+                    }
+                };
+                match result {
+                    Ok(stats) => {
+                        println!("imported {}, skipped {}", stats.imported, stats.skipped);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("import failed: {}", e);
+                        ExitCode::from(1)
+                    }
                 }
             }
         }
@@ -358,37 +394,10 @@ pub fn run(args: Vec<String>) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        "stats" => match db.counts() {
-            Ok(c) => {
-                println!(
-                    "paths: {}\nvisits: {}\nbookmarks: {}\nindexed dirs: {}\ntop: {}",
-                    c.total,
-                    c.total_visits,
-                    c.bookmarks,
-                    c.indexed,
-                    c.top_path.unwrap_or_else(|| "(none)".into())
-                );
-                // Auto-suggest prune if > 20% of history is stale
-                if c.total > 0 {
-                    let stale = db
-                        .history_rows()
-                        .map(|rows| rows.iter().filter(|r| !Path::new(&r.path).is_dir()).count())
-                        .unwrap_or(0);
-                    let pct = (stale as f64 / c.total as f64) * 100.0;
-                    if pct > 20.0 {
-                        println!(
-                            "\n⚠ {:.0}% stale ({} of {}) — run `hop prune` to clean up",
-                            pct, stale, c.total
-                        );
-                    }
-                }
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("stats failed: {}", e);
-                ExitCode::from(1)
-            }
-        },
+        "stats" => {
+            let verbose = args.iter().any(|a| a == "--verbose" || a == "-V");
+            cmd_stats(&db, verbose)
+        }
         "reindex" | "--reindex" | "-r" => {
             let stats = index::reindex(&db, &cfg);
             println!(
@@ -566,6 +575,69 @@ fn cmd_bookmark(db: &Database, args: &[String]) -> ExitCode {
                 }
                 _ => ExitCode::from(1),
             }
+        }
+    }
+}
+
+fn cmd_stats(db: &Database, verbose: bool) -> ExitCode {
+    match db.counts() {
+        Ok(c) => {
+            println!(
+                "paths: {}\nvisits: {}\nbookmarks: {}\nindexed dirs: {}\ntop: {}",
+                c.total,
+                c.total_visits,
+                c.bookmarks,
+                c.indexed,
+                c.top_path.unwrap_or_else(|| "(none)".into())
+            );
+            // Auto-suggest prune if > 20% of history is stale
+            if c.total > 0 {
+                let stale = db
+                    .history_rows()
+                    .map(|rows| rows.iter().filter(|r| !Path::new(&r.path).is_dir()).count())
+                    .unwrap_or(0);
+                let pct = (stale as f64 / c.total as f64) * 100.0;
+                if pct > 20.0 {
+                    println!(
+                        "\n⚠ {:.0}% stale ({} of {}) — run `hop prune` to clean up",
+                        pct, stale, c.total
+                    );
+                }
+            }
+            if verbose {
+                println!();
+                // Top 10 most visited dirs
+                let top10 = db.top(10).unwrap_or_default();
+                let live_top10 = Database::filter_live_rows(top10);
+                if !live_top10.is_empty() {
+                    println!("top 10 most visited:");
+                    for r in &live_top10 {
+                        println!("  {:>6} visits  {}", r.visits, r.path);
+                    }
+                } else {
+                    println!("top 10 most visited: (none)");
+                }
+                // Longest-unvisited (oldest last_visited but still in DB)
+                if let Ok(rows) = db.history_rows() {
+                    if let Some(oldest) = rows.iter().min_by(|a, b| {
+                        a.last_visited
+                            .partial_cmp(&b.last_visited)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    }) {
+                        println!();
+                        println!(
+                            "longest-unvisited: {} (last visited {:.1} days ago)",
+                            oldest.path,
+                            (now_secs() - oldest.last_visited) / 86_400.0
+                        );
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("stats failed: {}", e);
+            ExitCode::from(1)
         }
     }
 }
@@ -845,15 +917,14 @@ fn cmd_export(db: &Database, format: &str) -> ExitCode {
             println!("{}", serde_json::to_string_pretty(&payload).unwrap());
         }
         "csv" => {
-            println!("type,alias_or_path,visits,last_visited,is_git_repo");
+            // Header: path,visits,last_visited,is_bookmark,alias
+            println!("path,visits,last_visited,is_bookmark,alias");
             for r in &history {
-                println!(
-                    "history,{},{},{},{}",
-                    r.path, r.visits, r.last_visited, r.is_git_repo
-                );
+                println!("{},{},{},false,", r.path, r.visits, r.last_visited);
             }
             for (alias, path) in &bookmarks {
-                println!("bookmark,{}:{},0,0,false", alias, path);
+                // For bookmarks, visits=0 and is_bookmark=true
+                println!("{},0,0,true,{}", path, alias);
             }
         }
         "tsv" => {

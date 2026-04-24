@@ -106,6 +106,88 @@ impl Scorer {
         })
     }
 
+    /// Score a history row using a plain string query (no fuzzy metacharacters).
+    /// Used for regex/negation paths after the filter has already matched.
+    pub fn score_history_boosted(&self, row: &HistoryRow, pattern: &str) -> Option<Scored> {
+        // No fuzzy match — we already know the pattern matched the path.
+        // Score purely on bonus components; fuzzy=0 for neutral ranking.
+        let basename_lower = basename_lower(&row.path);
+        let pattern_lower = pattern.to_lowercase();
+        let basename_bonus = basename_lower.contains(&pattern_lower);
+
+        let age_days = (self.now - row.last_visited) / 86_400.0;
+        let recency = if age_days < 1.0 {
+            3.0
+        } else if age_days < 7.0 {
+            2.0
+        } else if age_days < 30.0 {
+            1.0
+        } else {
+            0.5
+        };
+        let visit_boost = (row.visits as f64).sqrt().min(5.0);
+        let depth = row.path.matches('/').count().max(1) as f64;
+        let shortness = (10.0 / depth).max(1.0);
+
+        let score = (visit_boost * 20.0) as i64
+            + (recency * 15.0) as i64
+            + if row.is_git_repo { 30 } else { 0 }
+            + if basename_bonus { 40 } else { 0 }
+            + (shortness * 5.0) as i64;
+
+        Some(Scored {
+            path: row.path.clone(),
+            score,
+            source: Source::History,
+            matched_indices: vec![],
+        })
+    }
+
+    /// Breakdown variant of score_history_boosted.
+    pub fn score_history_breakdown_boosted(
+        &self,
+        row: &HistoryRow,
+        pattern: &str,
+    ) -> Option<ScoreBreakdown> {
+        let basename_lower = basename_lower(&row.path);
+        let pattern_lower = pattern.to_lowercase();
+        let basename_bonus = basename_lower.contains(&pattern_lower) as i64;
+
+        let age_days = (self.now - row.last_visited) / 86_400.0;
+        let recency = if age_days < 1.0 {
+            3.0
+        } else if age_days < 7.0 {
+            2.0
+        } else if age_days < 30.0 {
+            1.0
+        } else {
+            0.5
+        };
+        let visit_boost = (row.visits as f64).sqrt().min(5.0);
+        let depth = row.path.matches('/').count().max(1) as f64;
+        let shortness = (10.0 / depth).max(1.0);
+        let git = if row.is_git_repo { 30 } else { 0 };
+
+        // For boosted scoring, fuzzy=0 since we already matched via pattern/regex
+        let total = (visit_boost * 20.0) as i64
+            + (recency * 15.0) as i64
+            + git
+            + basename_bonus * 40
+            + (shortness * 5.0) as i64;
+
+        Some(ScoreBreakdown {
+            path: row.path.clone(),
+            total,
+            fuzzy: 0,
+            visits: (visit_boost * 20.0) as i64,
+            recency: (recency * 15.0) as i64,
+            git,
+            basename: basename_bonus * 40,
+            shortness: (shortness * 5.0) as i64,
+            source: Source::History,
+        })
+    }
+
     /// Score a history row and return per-component breakdown.
     pub fn score_history_breakdown(&self, row: &HistoryRow, query: &str) -> Option<ScoreBreakdown> {
         let (fuzzy, _) = self.matcher.fuzzy_indices(&row.path, query)?;
@@ -275,10 +357,20 @@ pub fn score_history_batch(
         rows.iter().collect()
     };
 
-    let scored: Vec<Scored> = filtered
-        .iter()
-        .filter_map(|row| scorer.score_history(row, match_query))
-        .collect();
+    // For regex/negation queries, the raw query (e.g. "foo\d+") can't be fuzzy-matched.
+    // We use a neutral fuzzy score for matched candidates; for plain queries,
+    // use the full score_history path.
+    let scored: Vec<Scored> = if is_regex || is_negation {
+        filtered
+            .iter()
+            .filter_map(|row| scorer.score_history_boosted(row, effective))
+            .collect()
+    } else {
+        filtered
+            .iter()
+            .filter_map(|row| scorer.score_history(row, match_query))
+            .collect()
+    };
     let filter_applied = is_regex || is_negation;
     (scored, filter_applied)
 }
@@ -316,7 +408,13 @@ pub fn score_history_breakdown_batch(
 
     filtered
         .iter()
-        .filter_map(|row| scorer.score_history_breakdown(row, match_query))
+        .filter_map(|row| {
+            if is_regex || is_negation {
+                scorer.score_history_breakdown_boosted(row, effective)
+            } else {
+                scorer.score_history_breakdown(row, match_query)
+            }
+        })
         .collect()
 }
 
