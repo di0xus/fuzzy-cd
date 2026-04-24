@@ -188,6 +188,7 @@ fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
     let scorer = Scorer::new(now_secs());
     let mut candidates: Vec<Scored> = Vec::new();
     let limit = visible_rows().max(4) * 2;
+    let vr = visible_rows();
 
     if query.is_empty() {
         if let Ok(rows) = db.recent(limit) {
@@ -225,7 +226,7 @@ fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
     candidates.dedup_by(|a, b| a.path == b.path);
     candidates
         .into_iter()
-        .take(visible_rows().max(4))
+        .take(vr.max(4))
         .map(|c| PickerItem {
             path: c.path,
             source: c.source,

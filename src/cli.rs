@@ -76,6 +76,16 @@ pub fn run(args: Vec<String>) -> ExitCode {
     };
     let (cfg, _) = Config::load_with_warnings();
 
+    // Auto-prune on startup if configured
+    let verbose = args.iter().any(|a| a == "--verbose" || a == "-V");
+    if cfg.auto_prune_on_startup {
+        if let Ok(removed) = db.prune_auto(&cfg.skip_dirs) {
+            if verbose && removed > 0 {
+                eprintln!("auto-pruned {} stale entries", removed);
+            }
+        }
+    }
+
     match args[1].as_str() {
         "p" | "pick" => {
             // Strip `--` separator if present
@@ -98,14 +108,43 @@ pub fn run(args: Vec<String>) -> ExitCode {
             }
         }
         "add" => {
-            let Some(arg) = positional(&args, 2) else {
-                eprintln!("Usage: hop add <path>");
+            let path_arg = args.get(2);
+            let dry_run = args.get(3).map(String::as_str) == Some("--dry-run")
+                || (path_arg == Some(&"--dry-run".to_string()));
+            let path_str = if dry_run && path_arg == Some(&"--dry-run".to_string()) {
+                // hop add --dry-run with no path
+                args.get(3).or(args.get(2))
+            } else if path_arg == Some(&"--dry-run".to_string()) {
+                // hop add --dry-run <path>
+                args.get(3)
+            } else {
+                path_arg
+            };
+            let Some(arg) = path_str else {
+                eprintln!("Usage: hop add <path> [--dry-run]");
                 return ExitCode::from(2);
             };
             let path = expand_home(arg);
             if !path.is_dir() {
                 eprintln!("not a directory: {}", path.display());
                 return ExitCode::from(1);
+            }
+            if dry_run {
+                // Check if entry exists to determine "would add" vs "would create"
+                let existing = db
+                    .history_rows()
+                    .ok()
+                    .and_then(|rows| rows.into_iter().find(|r| r.path == path.to_string_lossy()));
+                if let Some(row) = existing {
+                    println!(
+                        "would add {} with {} visits",
+                        path.display(),
+                        row.visits + 1
+                    );
+                } else {
+                    println!("would create new entry: {}", path.display());
+                }
+                return ExitCode::SUCCESS;
             }
             let _ = db.record_visit(&path.to_string_lossy());
             ExitCode::SUCCESS
@@ -369,6 +408,14 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 ExitCode::from(1)
             }
         }
+        "explain" => {
+            let query = args[2..].join(" ");
+            if query.is_empty() {
+                eprintln!("Usage: hop explain <query>");
+                return ExitCode::from(2);
+            }
+            cmd_explain(&db, &cfg, &query)
+        }
         _ => {
             // treat unrecognized first arg as a query
             let query = args[1..].join(" ");
@@ -568,11 +615,10 @@ pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
     }
 
     if let Ok(rows) = db.history_rows() {
-        for r in rows {
-            if let Some(s) = scorer.score_history(&r, query) {
-                if Path::new(&s.path).is_dir() {
-                    cands.push(s);
-                }
+        let (scored, _) = crate::score::score_history_batch(&scorer, &rows, query);
+        for s in scored {
+            if Path::new(&s.path).is_dir() {
+                cands.push(s);
             }
         }
     }
@@ -597,11 +643,6 @@ pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
         .into_iter()
         .find(|c| c.score >= cfg.min_score)
         .map(|c| c.path)
-}
-
-#[allow(dead_code)]
-fn row_display(r: &HistoryRow) -> String {
-    format!("{:4} visits   {}", r.visits, r.path)
 }
 
 fn print_rows(rows: &[HistoryRow]) {
@@ -638,13 +679,12 @@ fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCod
         }
     }
 
-    // score history
+    // score history with regex/negation support
     if let Ok(rows) = db.history_rows() {
-        for r in rows {
-            if let Some(b) = scorer.score_history_breakdown(&r, query) {
-                if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
-                    breakdowns.push(b);
-                }
+        let more = crate::score::score_history_breakdown_batch(&scorer, &rows, query);
+        for b in more {
+            if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
+                breakdowns.push(b);
             }
         }
     }
@@ -729,11 +769,10 @@ fn cmd_list(db: &Database, cfg: &Config, query: &str, limit: usize, is_json: boo
     }
 
     if let Ok(rows) = db.history_rows() {
-        for r in rows {
-            if let Some(s) = scorer.score_history(&r, query) {
-                if Path::new(&s.path).is_dir() {
-                    scored.push(s);
-                }
+        let (scored_history, _) = crate::score::score_history_batch(&scorer, &rows, query);
+        for s in scored_history {
+            if Path::new(&s.path).is_dir() {
+                scored.push(s);
             }
         }
     }
@@ -832,6 +871,83 @@ fn cmd_export(db: &Database, format: &str) -> ExitCode {
             eprintln!("unknown format '{}': use json, csv, or tsv", format);
             return ExitCode::from(2);
         }
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_explain(db: &Database, cfg: &Config, query: &str) -> ExitCode {
+    let scorer = Scorer::new(now_secs());
+    let mut breakdowns: Vec<ScoreBreakdown> = Vec::new();
+
+    // exact bookmark first
+    if let Ok(Some(p)) = db.bookmark_exact(query) {
+        if Path::new(&p).is_dir() {
+            if let Some(b) = scorer.score_bookmark_breakdown(query, &p, query) {
+                breakdowns.push(b);
+            }
+        }
+    }
+
+    // score bookmarks
+    if let Ok(bms) = db.bookmarks() {
+        for (alias, path) in bms {
+            if let Some(b) = scorer.score_bookmark_breakdown(&alias, &path, query) {
+                if Path::new(&b.path).is_dir() && b.total > cfg.min_score {
+                    breakdowns.push(b);
+                }
+            }
+        }
+    }
+
+    // score history with regex/negation support
+    if let Ok(rows) = db.history_rows() {
+        let more = crate::score::score_history_breakdown_batch(&scorer, &rows, query);
+        for b in more {
+            if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
+                breakdowns.push(b);
+            }
+        }
+    }
+
+    // fallback index only if best is weak
+    let best_history = breakdowns.iter().map(|b| b.total).max().unwrap_or(0);
+    if best_history < cfg.min_score * 2 {
+        if let Ok(paths) = db.index_rows() {
+            for p in paths {
+                if let Some(b) = scorer.score_indexed_breakdown(&p, query) {
+                    if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
+                        breakdowns.push(b);
+                    }
+                }
+            }
+        }
+    }
+
+    breakdowns.sort_by_key(|b| std::cmp::Reverse(b.total));
+    breakdowns.dedup_by(|a, b| a.path == b.path);
+
+    if breakdowns.is_empty() {
+        return ExitCode::from(1);
+    }
+
+    // Human-readable per-component breakdown
+    println!("query: {}", query);
+    println!();
+    for (i, b) in breakdowns.iter().take(10).enumerate() {
+        let trophy = if i == 0 { " (best)" } else { "" };
+        println!(
+            "{}{}  total={:>4}  fuzzy={:>3}  visit_boost={:>3}  recency_boost={:>2}  git_bonus={:>2}  basename_bonus={:>2}  shortness={:>2}  [{:?}]",
+            b.path,
+            trophy,
+            b.total,
+            b.fuzzy,
+            b.visits,
+            b.recency,
+            b.git,
+            b.basename,
+            b.shortness,
+            b.source,
+        );
     }
     ExitCode::SUCCESS
 }
