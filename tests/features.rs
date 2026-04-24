@@ -6,9 +6,10 @@
 use std::process::Command;
 
 /// Returns a Command configured with an isolated tempfile-based data dir.
+#[allow(dead_code)]
 fn bin() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_hop"));
-    let tmp = tempfile::tempdir().unwrap().into_path();
+    let tmp = tempfile::tempdir().unwrap().keep().0;
     c.env("XDG_DATA_HOME", &tmp);
     c.env("HOME", &tmp);
     c
