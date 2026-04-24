@@ -8,6 +8,135 @@ pub struct ImportStats {
     pub skipped: usize,
 }
 
+/// Parse an import file and return a preview of what would be imported,
+/// WITHOUT writing to the database. Returns list of paths that would be imported.
+pub fn import_dry_run(source: &str, path: &Path) -> std::io::Result<Vec<String>> {
+    match source {
+        "fasd" => dry_run_fasd(path),
+        "autojump" => dry_run_autojump(path),
+        "zoxide" => dry_run_zoxide(path),
+        "zsh" => dry_run_zsh(path),
+        "thefuck" => dry_run_thefuck(path),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown source: {}", source),
+        )),
+    }
+}
+
+fn dry_run_fasd(path: &Path) -> std::io::Result<Vec<String>> {
+    let content = fs::read_to_string(path)?;
+    let mut result = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(3, '\t');
+        let raw_path = parts.next().unwrap_or("").trim();
+        if raw_path.is_empty() {
+            continue;
+        }
+        let abs = expand_home(raw_path);
+        if is_existing_dir(&abs) {
+            result.push(abs.to_string_lossy().into_owned());
+        }
+    }
+    Ok(result)
+}
+
+fn dry_run_autojump(path: &Path) -> std::io::Result<Vec<String>> {
+    let content = fs::read_to_string(path)?;
+    let mut result = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, '\t');
+        let raw_path = parts.next().unwrap_or("").trim();
+        if raw_path.is_empty() {
+            continue;
+        }
+        let abs = expand_home(raw_path);
+        if is_existing_dir(&abs) {
+            result.push(abs.to_string_lossy().into_owned());
+        }
+    }
+    Ok(result)
+}
+
+fn dry_run_zoxide(path: &Path) -> std::io::Result<Vec<String>> {
+    use rmp_serde::Deserializer;
+    use serde::Deserialize;
+    let data = fs::read(path)?;
+    let mut result = Vec::new();
+
+    #[derive(Debug, Deserialize)]
+    struct ZoxideEntry(String, f64);
+
+    let mut deser = Deserializer::new(&data[..]);
+    if let Ok(entries) = Vec::<ZoxideEntry>::deserialize(&mut deser) {
+        for entry in entries {
+            let abs = expand_home(&entry.0);
+            if is_existing_dir(&abs) {
+                result.push(abs.to_string_lossy().into_owned());
+            }
+        }
+    } else {
+        let mut deser2 = Deserializer::new(&data[..]);
+        if let Ok(paths) = Vec::<String>::deserialize(&mut deser2) {
+            for raw_path in paths {
+                let abs = expand_home(&raw_path);
+                if is_existing_dir(&abs) {
+                    result.push(abs.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn dry_run_zsh(path: &Path) -> std::io::Result<Vec<String>> {
+    let content = fs::read_to_string(path)?;
+    let commands = parse_zsh_history(&content);
+    let mut result = Vec::new();
+    for cmd in commands {
+        if let Some(target) = extract_cd_target(&cmd) {
+            let expanded = expand_home(&target);
+            if is_existing_dir(&expanded) {
+                result.push(expanded.to_string_lossy().into_owned());
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn dry_run_thefuck(path: &Path) -> std::io::Result<Vec<String>> {
+    let content = fs::read_to_string(path)?;
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("alias ") {
+            continue;
+        }
+        let after_alias = match trimmed.strip_prefix("alias ") {
+            Some(s) => s,
+            None => continue,
+        };
+        let (alias, expr) = match after_alias.split_once('=') {
+            Some((a, e)) => (a, e),
+            None => continue,
+        };
+        let expr = expr.trim_matches(|c| c == '\'' || c == '"');
+        if let Some(target) = extract_cd_target_from_alias_expr(expr) {
+            let abs = expand_home(&target);
+            if is_existing_dir(&abs) && !alias.trim().is_empty() {
+                result.push(format!("{} -> {}", alias.trim(), abs.display()));
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// fasd `.fasd` cache is tab-separated: `path\tvisits\tlast`.
 pub fn import_fasd(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
     let content = fs::read_to_string(path)?;
