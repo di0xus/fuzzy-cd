@@ -2,6 +2,7 @@ use std::path::Path;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use regex::Regex;
 
 use crate::db::HistoryRow;
 
@@ -194,6 +195,129 @@ fn basename_lower(path: &str) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default()
+}
+
+/// Returns the effective query string after stripping regex (^) or negation (!) prefix.
+/// Also returns whether the query is a regex or negation type.
+pub fn classify_query(query: &str) -> (&str, bool, bool) {
+    let is_regex = query.starts_with('/');
+    let is_negation = query.starts_with('!');
+    let effective = if is_regex || is_negation {
+        &query[1..]
+    } else {
+        query
+    };
+    (effective, is_regex, is_negation)
+}
+
+/// Returns true if the path matches the given pattern.
+/// For regex patterns, uses regex; otherwise uses substring match (case-insensitive).
+fn path_matches_pattern(path: &str, pattern: &str, is_regex: bool) -> bool {
+    if is_regex {
+        let re = Regex::new(pattern).ok();
+        re.map_or(false, |r| r.is_match(path))
+    } else {
+        path.to_lowercase().contains(&pattern.to_lowercase())
+    }
+}
+
+/// Pre-filter candidates based on regex or negation query modifiers.
+/// Returns the filtered list and whether any filtering was applied.
+pub fn apply_query_filter(rows: &[HistoryRow], query: &str) -> (Vec<HistoryRow>, bool) {
+    let (effective, is_regex, is_negation) = classify_query(query);
+    if !is_regex && !is_negation {
+        return (rows.to_vec(), false);
+    }
+    if effective.is_empty() {
+        return (rows.to_vec(), false);
+    }
+    let filtered: Vec<HistoryRow> = rows
+        .iter()
+        .filter(|row| {
+            let matches = path_matches_pattern(&row.path, effective, is_regex);
+            if is_negation {
+                !matches
+            } else {
+                matches
+            }
+        })
+        .cloned()
+        .collect();
+    (filtered, true)
+}
+
+/// Score a list of history rows with optional regex/negation filtering.
+/// Returns (scored candidates, filter_applied).
+pub fn score_history_batch(
+    scorer: &Scorer,
+    rows: &[HistoryRow],
+    query: &str,
+) -> (Vec<Scored>, bool) {
+    let (effective, is_regex, is_negation) = classify_query(query);
+    let match_query = if is_regex || is_negation {
+        effective
+    } else {
+        query
+    };
+
+    let filtered: Vec<&HistoryRow> = if is_regex || is_negation {
+        rows.iter()
+            .filter(|row| {
+                let matches = path_matches_pattern(&row.path, effective, is_regex);
+                if is_negation {
+                    !matches
+                } else {
+                    matches
+                }
+            })
+            .collect()
+    } else {
+        rows.iter().collect()
+    };
+
+    let scored: Vec<Scored> = filtered
+        .iter()
+        .filter_map(|row| scorer.score_history(row, match_query))
+        .collect();
+    let filter_applied = is_regex || is_negation;
+    (scored, filter_applied)
+}
+
+/// Score a list of history rows and return per-component breakdowns.
+/// For regex/negation queries, filtering is applied but the original query is
+/// still used for fuzzy matching.
+pub fn score_history_breakdown_batch(
+    scorer: &Scorer,
+    rows: &[HistoryRow],
+    query: &str,
+) -> Vec<ScoreBreakdown> {
+    let (effective, is_regex, is_negation) = classify_query(query);
+    // For breakdown display, use effective query for matching (strip prefix)
+    let match_query = if is_regex || is_negation {
+        effective
+    } else {
+        query
+    };
+
+    let filtered: Vec<&HistoryRow> = if is_regex || is_negation {
+        rows.iter()
+            .filter(|row| {
+                let matches = path_matches_pattern(&row.path, effective, is_regex);
+                if is_negation {
+                    !matches
+                } else {
+                    matches
+                }
+            })
+            .collect()
+    } else {
+        rows.iter().collect()
+    };
+
+    filtered
+        .iter()
+        .filter_map(|row| scorer.score_history_breakdown(row, match_query))
+        .collect()
 }
 
 #[cfg(test)]

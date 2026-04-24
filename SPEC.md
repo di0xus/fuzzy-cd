@@ -9,30 +9,40 @@ Formerly shipped as `fuzzy-cd`; renamed to `hop` in v0.4.
 
 ## Surfaces
 
-| Command                         | Behavior                                 |
-| ------------------------------- | ---------------------------------------- |
-| `hop <query>`                   | Prints best match path; exit 1 if none. |
-| `hop p|pick [query]`            | Same; empty query opens picker.         |
-| `hop` (bare)                    | Interactive picker.                     |
-| `hop add <path>`                | Record a visit.                         |
-| `hop rm <path>`                 | Drop from history (exact path).       |
-| `hop forget|zap <query>`        | Fuzzy-find and remove from history.  |
-| `hop book <alias> [path]`       | Set or resolve bookmark.                |
-| `hop book rm <alias>`           | Delete bookmark.                        |
-| `hop book list`                 | List bookmarks.                         |
-| `hop history [n]`               | Top n by visits (default 20).           |
-| `hop recent [n]`                | Last n visited.                         |
-| `hop top`                       | Top 10.                                 |
-| `hop import fasd|zsh <file>`    | Import from another tool.               |
-| `hop prune`                     | Remove stale paths.                     |
-| `hop clear`                     | Wipe history.                           |
-| `hop stats`                     | DB counts.                              |
-| `hop reindex`                   | Rebuild filesystem index.               |
-| `hop doctor`                    | Diagnose DB + shell hook.               |
-| `hop init <bash|zsh|fish>`      | Emit shell integration.                 |
-| `hop init --shell <name>`       | Same, explicit flag form.              |
-| `hop init --verify`             | Sanity-check shell integration.        |
-| `hop completions <bash|zsh|fish>` | Emit tab-completion script.           |
+| Command                             | Behavior                                           |
+| ----------------------------------- | -------------------------------------------------- |
+| `hop <query>`                       | Prints best match path; exit 1 if none.            |
+| `hop p|pick [query]`                | Same; empty query opens picker.                   |
+| `hop` (bare)                        | Interactive picker.                                |
+| `hop add <path> [--dry-run]`        | Record a visit (dry-run shows what would happen).  |
+| `hop rm <path>`                     | Drop from history (exact path).                    |
+| `hop forget|zap <query>`            | Fuzzy-find and remove from history.                |
+| `hop book <alias> [path]`           | Set or resolve bookmark.                           |
+| `hop book rm <alias>`               | Delete bookmark.                                   |
+| `hop book list`                     | List bookmarks.                                   |
+| `hop history [n]`                   | Top n by visits (default 20).                      |
+| `hop recent [n]`                    | Last n visited.                                    |
+| `hop top`                          | Top 10.                                            |
+| `hop import fasd|zsh <file>`        | Import from another tool.                          |
+| `hop prune`                        | Remove stale paths.                                |
+| `hop clear`                        | Wipe history.                                      |
+| `hop stats`                        | DB counts.                                          |
+| `hop reindex`                      | Rebuild filesystem index.                          |
+| `hop doctor`                       | Diagnose DB + shell hook.                          |
+| `hop init <bash|zsh|fish>`         | Emit shell integration.                            |
+| `hop init --shell <name>`           | Same, explicit flag form.                          |
+| `hop init --verify`                | Sanity-check shell integration.                   |
+| `hop completions <bash|zsh|fish>`  | Emit tab-completion script.                        |
+| `hop explain <query>`               | Show per-component score breakdown for top results.|
+| `hop score <query>`                 | Show per-component score breakdown (JSON also).   |
+| `hop list <query> [--limit N] [--json]` | List all scored matches.                     |
+| `hop export [--format json\|csv\|tsv]` | Dump history/bookmarks.                         |
+| `hop update [--dry-run]`            | Self-update to latest release.                    |
+
+## Query Modifiers
+
+Queries starting with `/` are treated as regex patterns (e.g., `hop /src/test.*`).
+Queries starting with `!` exclude paths matching the pattern (e.g., `hop !node_modules`).
 
 ## Scoring
 
@@ -89,6 +99,7 @@ index_roots = ["~/code"]
 skip_dirs   = ["node_modules"]
 max_depth   = 6
 min_score   = 20
+auto_prune_on_startup = false  # run prune_auto on every hop invocation
 ```
 
 ## Non-goals
