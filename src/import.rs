@@ -71,6 +71,7 @@ fn dry_run_zoxide(path: &Path) -> std::io::Result<Vec<String>> {
     let mut result = Vec::new();
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct ZoxideEntry(String, f64);
 
     let mut deser = Deserializer::new(&data[..]);
@@ -213,7 +214,7 @@ pub fn parse_zsh_history(content: &str) -> Vec<String> {
             buf.push_str(stripped);
             buf.push('\n');
         } else {
-            buf.push_str(&line);
+            buf.push_str(line);
             if !buf.trim().is_empty() {
                 out.push(std::mem::take(&mut buf));
             } else {
@@ -366,6 +367,7 @@ pub fn import_zoxide(db: &Database, path: &Path) -> std::io::Result<ImportStats>
     use rmp_serde::Deserializer;
     use serde::Deserialize;
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct ZoxideEntry(String, f64);
 
     let mut deser = Deserializer::new(&data[..]);
