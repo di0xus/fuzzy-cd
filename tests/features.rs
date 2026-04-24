@@ -9,7 +9,7 @@ use std::process::Command;
 #[allow(dead_code)]
 fn bin() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_hop"));
-    let tmp = tempfile::tempdir().unwrap().keep().0;
+    let tmp = tempfile::tempdir().unwrap().keep();
     c.env("XDG_DATA_HOME", &tmp);
     c.env("HOME", &tmp);
     c
