@@ -8,6 +8,7 @@ pub struct Config {
     pub skip_dirs: Vec<String>,
     pub max_depth: usize,
     pub min_score: i64,
+    pub auto_prune_on_startup: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -23,6 +24,7 @@ impl Default for Config {
             skip_dirs: Self::default_skip_dirs(),
             max_depth: 6,
             min_score: crate::score::MIN_SCORE,
+            auto_prune_on_startup: false,
         }
     }
 }
@@ -150,6 +152,16 @@ impl Config {
                     } else {
                         warnings.invalid_values.push(format!(
                             "invalid min_score value '{}' (expected integer)",
+                            value
+                        ));
+                    }
+                }
+                "auto_prune_on_startup" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        cfg.auto_prune_on_startup = b;
+                    } else {
+                        warnings.invalid_values.push(format!(
+                            "invalid auto_prune_on_startup value '{}' (expected boolean)",
                             value
                         ));
                     }

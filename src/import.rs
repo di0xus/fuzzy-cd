@@ -75,9 +75,9 @@ pub fn parse_zsh_history(content: &str) -> Vec<String> {
     let mut buf = String::new();
     for raw in content.lines() {
         let line = if let Some(rest) = raw.strip_prefix(": ") {
-            rest.split_once(';').map(|x| x.1).unwrap_or("").to_string()
+            rest.split_once(';').map(|x| x.1).unwrap_or("")
         } else {
-            raw.to_string()
+            raw
         };
 
         if let Some(stripped) = line.strip_suffix('\\') {

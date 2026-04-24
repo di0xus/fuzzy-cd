@@ -14,6 +14,7 @@ pub struct Database {
     conn: Connection,
 }
 
+#[derive(Clone, Debug)]
 pub struct HistoryRow {
     pub path: String,
     pub visits: i32,
@@ -218,7 +219,7 @@ impl Database {
         let now = now_secs();
         // Resolve symlinks to canonical path so /link/to/project and
         // /real/project share one history row.
-        let canonical = canonicalize_path(path).unwrap_or_else(|| path.to_string());
+        let canonical = canonicalize_path(path).unwrap_or_else(|| path.to_owned());
         let basename = basename_of(&canonical);
         let is_git = Path::new(&canonical).join(".git").exists() as i64;
         self.conn.execute(
@@ -309,6 +310,38 @@ impl Database {
             .filter(|p| !Path::new(p).is_dir())
             .collect();
         Ok((history_stale, index_stale))
+    }
+
+    /// Auto-prune: remove history rows with visits=1 AND last_visited > 90 days ago.
+    /// Also removes stale (deleted dirs) entries. Skips paths whose basename matches skip_dirs.
+    /// Returns the number of rows removed.
+    pub fn prune_auto(&self, skip_dirs: &[String]) -> rusqlite::Result<usize> {
+        let now = now_secs();
+        let ninety_days = 90.0 * 86_400.0;
+        let cutoff = now - ninety_days;
+
+        let rows = self.history_rows()?;
+        let to_remove: Vec<String> = rows
+            .into_iter()
+            .filter(|r| {
+                // Skip dirs from config
+                if let Some(name) = Path::new(&r.path).file_name() {
+                    let name_str = name.to_string_lossy();
+                    if skip_dirs.iter().any(|d| d == name_str.as_ref()) {
+                        return false;
+                    }
+                }
+                // Remove if visits=1 AND old, OR if path no longer exists
+                (r.visits == 1 && r.last_visited < cutoff) || !Path::new(&r.path).is_dir()
+            })
+            .map(|r| r.path)
+            .collect();
+
+        let mut removed = 0;
+        for p in &to_remove {
+            removed += self.forget(p)?;
+        }
+        Ok(removed)
     }
 
     pub fn history_rows(&self) -> rusqlite::Result<Vec<HistoryRow>> {

@@ -70,6 +70,7 @@ mod tests {
             skip_dirs: Config::default_skip_dirs(),
             max_depth: 5,
             min_score: 20,
+            auto_prune_on_startup: false,
         };
         let stats = reindex(&db, &cfg);
         assert_eq!(stats.scanned, 2, "should only scan a and a/b");
