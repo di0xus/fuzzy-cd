@@ -104,7 +104,9 @@ impl Config {
 
         let content = match std::fs::read_to_string(path) {
             Ok(s) => s,
-            Err(_) => return Config::default(),
+            Err(_e) => {
+                return Config::default();
+            }
         };
 
         for raw in content.lines() {

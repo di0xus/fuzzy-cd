@@ -285,7 +285,13 @@ pub fn classify_query(query: &str) -> (&str, bool, bool) {
     let is_regex = query.starts_with('/');
     let is_negation = query.starts_with('!');
     let effective = if is_regex || is_negation {
-        &query[1..]
+        let stripped = &query[1..];
+        // Strip trailing '/' delimiter for regex queries (e.g., "/foo/" → "foo")
+        if is_regex && stripped.ends_with('/') {
+            &stripped[..stripped.len() - 1]
+        } else {
+            stripped
+        }
     } else {
         query
     };
