@@ -361,11 +361,11 @@ fn regex_query_matches_pattern_in_paths() {
         .output()
         .unwrap();
 
-    // Query using regex pattern /foo\d+/
+    // Query using regex pattern /foo[0-9]+/
     let out = Command::new(env!("CARGO_BIN_EXE_hop"))
         .env("XDG_DATA_HOME", &tmp_keep)
         .env("HOME", &tmp_keep)
-        .args(["p", "/foo\\d+/"])
+        .args(["p", "/foo[0-9]+/"])
         .output()
         .unwrap();
 
@@ -436,12 +436,18 @@ fn negative_query_excludes_matched_paths() {
 #[test]
 fn auto_prune_on_startup_runs_silently_when_enabled() {
     let tmp = tempfile::tempdir().unwrap();
-
-    // On macOS, ProjectDirs uses ~/Library/Application Support/<app>/ not XDG_DATA_HOME.
-    // Config is at <data_dir>/config.toml where data_dir comes from ProjectDirs.
     let home = tmp.path();
-    // The data dir that hop uses (ProjectDirs on macOS = ~/Library/Application Support/hop)
-    let data_dir = home.join("Library").join("Application Support").join("hop");
+
+    // Use the correct per-OS data directory path.
+    // On macOS: $HOME/Library/Application Support/hop
+    // On Linux:  $HOME/.local/share/hop
+    // We cannot use ProjectDirs because it uses the REAL home directory,
+    // not the $HOME override set by the test.
+    let data_dir = if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support").join("hop")
+    } else {
+        home.join(".local").join("share").join("hop")
+    };
     std::fs::create_dir_all(&data_dir).unwrap();
     let config_path = data_dir.join("config.toml");
     std::fs::write(&config_path, "auto_prune_on_startup = true\n").unwrap();
@@ -451,8 +457,7 @@ fn auto_prune_on_startup_runs_silently_when_enabled() {
     std::fs::create_dir(&gone_dir).unwrap();
 
     let mut cmd_seed = Command::new(env!("CARGO_BIN_EXE_hop"));
-    cmd_seed.env("HOME", tmp.path());
-    cmd_seed.env("XDG_DATA_HOME", &data_dir);
+    cmd_seed.env("HOME", home);
     cmd_seed
         .args(["add", gone_dir.to_str().unwrap()])
         .output()
@@ -463,8 +468,7 @@ fn auto_prune_on_startup_runs_silently_when_enabled() {
 
     // Run hop stats — auto-prune should have removed the stale entry silently
     let out = Command::new(env!("CARGO_BIN_EXE_hop"))
-        .env("HOME", tmp.path())
-        .env("XDG_DATA_HOME", &data_dir)
+        .env("HOME", home)
         .args(["stats"])
         .output()
         .unwrap();

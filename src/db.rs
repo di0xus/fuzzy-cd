@@ -339,7 +339,10 @@ impl Database {
 
         let mut removed = 0;
         for p in &to_remove {
-            removed += self.forget(p)?;
+            // Delete directly so canonicalized paths match (forget does raw string match).
+            removed += self
+                .conn
+                .execute("DELETE FROM history WHERE path = ?1", params![p])?;
         }
         Ok(removed)
     }
