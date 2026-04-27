@@ -219,15 +219,20 @@ __hop_cd() {
 # A named function "cd" preserves "cd" as the command name (not __hop_cd),
 # so zsh looks for "cd" completions.  compdef _hop_cd cd registers our
 # custom _hop_cd function (defined below) as the completion handler for cd.
-# Inside _hop_cd, we call _cd to get the standard zsh directory completions
-# (cdpath, ~ expansion, -L/-P flags, etc.) via compadd, which is correct.
 function cd() { __hop_cd "$@"; }
 
-# _hop_cd: completion function for cd, registered via compdef below.
-# Uses the builtin _cd to generate standard directory completions.
+# _hop_cd: completion function for cd.
+# Uses compadd to complete directory names — no dependency on _cd or compinit.
 _hop_cd() {
-    # Delegate entirely to _cd for standard cd completions (paths, cdpath, ~user, -L/-P)
-    _cd "$@"
+    local -a dirs
+    # Collect directories from CDPATH entries and current dir
+    local cdpath_entry
+    for cdpath_entry in ${(s,:,)CDPATH}; do
+        dirs+=($(compgen -d -- "${cdpath_entry:-$PWD}/"))
+    done
+    # Complete from current directory
+    dirs+=($(compgen -d -- ./))
+    compadd -a dirs
 }
 
 compdef _hop_cd cd
