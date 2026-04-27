@@ -1,9 +1,106 @@
-pub fn script_for(shell: &str) -> Option<&'static str> {
+pub fn script_for(shell: &str) -> Option<String> {
     match shell {
-        "bash" => Some(BASH),
-        "zsh" => Some(ZSH),
-        "fish" => Some(FISH),
+        "bash" => Some(BASH.to_string()),
+        "zsh" => Some(ZSH.to_string()),
+        "fish" => Some(fish_script()),
         _ => None,
+    }
+}
+
+/// Returns the fish version as a tuple (major, minor), or None if unavailable.
+fn fish_version() -> Option<(u32, u32)> {
+    let output = std::process::Command::new("fish")
+        .arg("--version")
+        .output()
+        .ok()?;
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    // fish --version outputs e.g. "fish, version 3.6.0"
+    let version_str = version_str.trim();
+    // Find the version number after "version "
+    let version_part = version_str
+        .rsplit(',')
+        .next()?
+        .trim_start_matches("version ");
+    let parts: Vec<&str> = version_part.split('.').collect();
+    let major = parts.first()?.parse().ok()?;
+    let minor = parts
+        .get(1)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    Some((major, minor))
+}
+
+fn fish_script() -> String {
+    let use_abbr = fish_version()
+        .map(|(major, minor)| major > 2 || (major == 2 && minor >= 9))
+        .unwrap_or(false);
+
+    if use_abbr {
+        r#"# hop fish integration
+function __hop_chpwd --on-variable PWD
+    command hop add -- "$PWD" >/dev/null 2>&1
+end
+
+function __hop_cd
+    if test (count $argv) -eq 0
+        set -l dir (command hop pick)
+        if test -n "$dir"
+            builtin cd -- "$dir"
+        end
+        return
+    end
+    switch $argv[1]
+        case '-' '..' '.' '~' '~/'
+            builtin cd -- $argv
+            return
+    end
+    if test -d "$argv[1]"
+        builtin cd -- $argv
+        return
+    end
+    set -l dir (command hop p -- $argv)
+    if test -n "$dir"
+        builtin cd -- "$dir"
+    else
+        builtin cd -- $argv
+    end
+end
+abbr --add cd=__hop_cd
+"#
+        .to_string()
+    } else {
+        r#"# hop fish integration
+function __hop_chpwd --on-variable PWD
+    command hop add -- "$PWD" >/dev/null 2>&1
+end
+
+function __hop_cd
+    if test (count $argv) -eq 0
+        set -l dir (command hop pick)
+        if test -n "$dir"
+            builtin cd -- "$dir"
+        end
+        return
+    end
+    switch $argv[1]
+        case '-' '..' '.' '~' '~/'
+            builtin cd -- $argv
+            return
+    end
+    if test -d "$argv[1]"
+        builtin cd -- $argv
+        return
+    end
+    set -l dir (command hop p -- $argv)
+    if test -n "$dir"
+        builtin cd -- "$dir"
+    else
+        builtin cd -- $argv
+    end
+end
+alias cd=__hop_cd
+"#
+        .to_string()
     }
 }
 
@@ -119,38 +216,6 @@ __hop_cd() {
     fi
 }
 alias cd='__hop_cd'
-"#;
-
-const FISH: &str = r#"# hop fish integration
-function __hop_chpwd --on-variable PWD
-    command hop add -- "$PWD" >/dev/null 2>&1
-end
-
-function __hop_cd
-    if test (count $argv) -eq 0
-        set -l dir (command hop pick)
-        if test -n "$dir"
-            builtin cd -- "$dir"
-        end
-        return
-    end
-    switch $argv[1]
-        case '-' '..' '.' '~' '~/'
-            builtin cd -- $argv
-            return
-    end
-    if test -d "$argv[1]"
-        builtin cd -- $argv
-        return
-    end
-    set -l dir (command hop p -- $argv)
-    if test -n "$dir"
-        builtin cd -- "$dir"
-    else
-        builtin cd -- $argv
-    end
-end
-alias cd=__hop_cd
 "#;
 
 #[cfg(test)]

@@ -16,14 +16,14 @@ Formerly shipped as `fuzzy-cd`; renamed to `hop` in v0.4.
 | `hop` (bare)                        | Interactive picker.                                |
 | `hop add <path> [--dry-run]`        | Record a visit (dry-run shows what would happen).  |
 | `hop rm <path>`                     | Drop from history (exact path).                    |
-| `hop forget|zap <query>`            | Fuzzy-find and remove from history.                |
+| `hop forget|zap <query> [--dry-run]` | Fuzzy-find and remove from history (dry-run preview).   |
 | `hop book <alias> [path]`           | Set or resolve bookmark.                           |
 | `hop book rm <alias>`               | Delete bookmark.                                   |
 | `hop book list`                     | List bookmarks.                                   |
 | `hop history [n]`                   | Top n by visits (default 20).                      |
 | `hop recent [n]`                    | Last n visited.                                    |
 | `hop top`                          | Top 10.                                            |
-| `hop import fasd|zsh <file>`        | Import from another tool.                          |
+| `hop import <source> [--dry-run] <file>` | Import from fasd/autojump/zoxide/zsh/thefuck.  |
 | `hop prune`                        | Remove stale paths.                                |
 | `hop clear`                        | Wipe history.                                      |
 | `hop stats`                        | DB counts.                                          |
@@ -128,10 +128,9 @@ src/
 ```
 
 ## Tests
-
-- 39 unit tests covering scoring ordering, migrations (incl. legacy v0.2
+- 49 unit tests covering scoring ordering, migrations (incl. legacy v0.2
   schema), import parsing, config parsing, indexing, doctor, completions,
-  init verify.
+  init verify, picker.
 - 8 integration tests invoking the built binary via
   `CARGO_BIN_EXE_hop`.
 - CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.

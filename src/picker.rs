@@ -1,5 +1,5 @@
-use std::io::{self, Write};
-use std::process::Command;
+use std::io::{self, Read, Write};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crossterm::{
@@ -235,6 +235,15 @@ fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
         .collect()
 }
 
+/// Returns the picker subprocess timeout from HOP_PICKER_TIMEOUT env var, default 5s.
+fn picker_timeout() -> Duration {
+    std::env::var("HOP_PICKER_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(5))
+}
+
 fn render<W: Write>(
     out: &mut W,
     query: &str,
@@ -246,6 +255,7 @@ fn render<W: Write>(
 ) -> io::Result<()> {
     let nc = no_color();
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let timeout = picker_timeout();
 
     out.queue(cursor::MoveTo(0, 0))?
         .queue(Clear(ClearType::All))?;
@@ -316,17 +326,37 @@ fn render<W: Write>(
         if preview && selected {
             // Right pane: ls output
             out.queue(Print("  "))?;
-            if let Ok(output) = Command::new("ls")
-                .arg("-la")
-                .arg("--color=always")
+            let color_arg = if nc {
+                "--color=never"
+            } else {
+                "--color=always"
+            };
+            let mut cmd = Command::new("ls");
+            cmd.arg("-la")
+                .arg(color_arg)
                 .arg("--")
                 .arg(&item.path)
-                .output()
-            {
-                let ls_out = String::from_utf8_lossy(&output.stdout);
-                for line in ls_out.lines().take((rows as usize).saturating_sub(6)) {
-                    out.queue(Print(line))?;
-                    out.queue(Print("\r\n"))?;
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Ok(mut child) = cmd.spawn() {
+                let handle = std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    if let Some(ref mut stdout) = child.stdout {
+                        let _ = stdout.read_to_end(&mut buf);
+                    }
+                    match child.wait() {
+                        Ok(exit) if exit.success() => Some(buf),
+                        _ => None,
+                    }
+                });
+                std::thread::sleep(timeout);
+                let output = handle.join().ok().flatten();
+                if let Some(bytes) = output {
+                    let ls_out = String::from_utf8_lossy(&bytes);
+                    for line in ls_out.lines().take((rows as usize).saturating_sub(6)) {
+                        out.queue(Print(line))?;
+                        out.queue(Print("\r\n"))?;
+                    }
                 }
             }
         }

@@ -1,4 +1,6 @@
 use std::path::Path;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -299,11 +301,33 @@ pub fn classify_query(query: &str) -> (&str, bool, bool) {
 }
 
 /// Returns true if the path matches the given pattern.
-/// For regex patterns, uses regex; otherwise uses substring match (case-insensitive).
+/// For regex patterns, uses regex with timeout protection; otherwise uses substring match (case-insensitive).
 fn path_matches_pattern(path: &str, pattern: &str, is_regex: bool) -> bool {
     if is_regex {
-        let re = Regex::new(pattern).ok();
-        re.is_some_and(|r| r.is_match(path))
+        let path = path.to_lowercase();
+        let pattern = pattern.to_lowercase();
+
+        // Use a thread with timeout to protect against malicious regex (ReDoS)
+        let (tx, rx) = mpsc::channel();
+        let pattern_clone = pattern.clone();
+        let path_clone = path.clone();
+        std::thread::spawn(move || {
+            let result = Regex::new(&pattern_clone).map(|re| re.is_match(&path_clone));
+            let _ = tx.send(result);
+        });
+        let timeout = Duration::from_millis(100);
+        let result = rx
+            .recv_timeout(timeout)
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false);
+
+        if result {
+            return true;
+        }
+
+        // Timeout or regex error: fall back to substring matching
+        path.contains(&pattern)
     } else {
         path.to_lowercase().contains(&pattern.to_lowercase())
     }
