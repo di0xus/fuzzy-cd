@@ -215,7 +215,18 @@ __hop_cd() {
         builtin cd -- "$@"
     fi
 }
-alias cd='__hop_cd'
+
+# Replace 'alias cd=__hop_cd' with a named function.
+# 'alias cd=__hop_cd' fails because zsh completion is command-name based:
+#   - alias expands "cd" → "__hop_cd" in the command position
+#   - zsh looks for a completion handler for "__hop_cd" → none found → no completion
+# A named function "cd" preserves "cd" as the command name after alias expansion,
+# so zsh looks for "cd" completions.  Then "compdef _cd cd" explicitly registers
+# the builtin _cd completer (directory completion, cdpath, ~ expansion) for "cd".
+# Finally, "hop p" is invoked via __hop_cd to get the fuzzy match.
+function cd() { __hop_cd "$@"; }
+autoload -Uz _cd
+compdef _cd cd
 "#;
 
 #[cfg(test)]
