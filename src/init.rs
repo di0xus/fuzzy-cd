@@ -215,11 +215,7 @@ __hop_cd() {
         builtin cd -- "$@"
     fi
 }
-# Tell zsh to use native cd completions for the __hop_cd wrapper.
-# Without this, "cd <Tab>" would not complete paths because __hop_cd is
-# a custom function, not the real cd builtin.
-autoload -Uz _cd
-compdef _cd __hop_cd
+alias cd='__hop_cd'
 "#;
 
 #[cfg(test)]
