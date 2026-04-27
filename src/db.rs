@@ -102,8 +102,9 @@ impl Database {
             std::fs::create_dir_all(parent).ok();
         }
         let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL").ok();
-        conn.pragma_update(None, "synchronous", "NORMAL").ok();
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         let db = Database { conn };
         db.migrate()?;
         Ok(db)
@@ -255,41 +256,60 @@ impl Database {
     where
         F: Fn(usize, usize),
     {
-        // History stale
-        let history_paths: Vec<String> = self
+        // History stale - stream in batches to avoid loading all paths into memory
+        let total: usize = self
             .conn
-            .prepare("SELECT path FROM history")?
-            .query_map([], |r| r.get::<_, String>(0))?
-            .flatten()
-            .collect();
-        let total = history_paths.len();
+            .query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))?;
+        let mut stmt = self.conn.prepare("SELECT path FROM history")?;
+        let mut rows = stmt.query([])?;
+        let mut batch = Vec::with_capacity(batch_size);
         let mut removed = 0;
-        for batch in history_paths.chunks(batch_size) {
-            for p in batch {
-                if !Path::new(p).is_dir() {
-                    removed += self.forget(p)?;
+        while let Some(row) = rows.next()? {
+            let p: String = row.get(0)?;
+            batch.push(p);
+            if batch.len() == batch_size {
+                for p in batch.drain(..) {
+                    if !Path::new(&p).is_dir() {
+                        removed += self.forget(&p)?;
+                    }
                 }
+                progress(batch.len(), total);
             }
-            progress(batch.len(), total);
         }
+        for p in batch.drain(..) {
+            if !Path::new(&p).is_dir() {
+                removed += self.forget(&p)?;
+            }
+        }
+        progress(removed, total);
 
-        // Index stale
-        let idx_paths: Vec<String> = self
+        // Index stale - stream in batches to avoid loading all paths into memory
+        let total_idx: usize = self
             .conn
-            .prepare("SELECT path FROM dir_index")?
-            .query_map([], |r| r.get::<_, String>(0))?
-            .flatten()
-            .collect();
-        let total_idx = idx_paths.len();
-        for batch in idx_paths.chunks(batch_size) {
-            for p in batch {
-                if !Path::new(p).is_dir() {
-                    self.conn
-                        .execute("DELETE FROM dir_index WHERE path = ?1", params![p])?;
+            .query_row("SELECT COUNT(*) FROM dir_index", [], |r| r.get(0))?;
+        let mut stmt = self.conn.prepare("SELECT path FROM dir_index")?;
+        let mut rows = stmt.query([])?;
+        let mut batch = Vec::with_capacity(batch_size);
+        while let Some(row) = rows.next()? {
+            let p: String = row.get(0)?;
+            batch.push(p);
+            if batch.len() == batch_size {
+                for p in batch.drain(..) {
+                    if !Path::new(&p).is_dir() {
+                        self.conn
+                            .execute("DELETE FROM dir_index WHERE path = ?1", params![p])?;
+                    }
                 }
+                progress(batch.len(), total_idx);
             }
-            progress(batch.len(), total_idx);
         }
+        for p in batch.drain(..) {
+            if !Path::new(&p).is_dir() {
+                self.conn
+                    .execute("DELETE FROM dir_index WHERE path = ?1", params![p])?;
+            }
+        }
+        progress(batch.len(), total_idx);
         Ok(removed)
     }
 

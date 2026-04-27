@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::db::{Database, SCHEMA_VERSION};
+use crate::db::{default_data_dir, Database, SCHEMA_VERSION};
 
 pub struct Report {
     pub ok: bool,
@@ -79,6 +79,35 @@ pub fn run(db: &Database) -> Report {
             ));
         }
         lines.push("  → run `hop prune` to deduplicate".to_string());
+    }
+
+    // Data directory permissions
+    let data_dir = default_data_dir();
+    if let Ok(_readable) = std::fs::read_dir(&data_dir) {
+        let can_write = std::fs::metadata(&data_dir)
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(false);
+        if can_write {
+            lines.push(format!(
+                "⚠ data dir {} is read-only — hop cannot persist history",
+                data_dir.display()
+            ));
+            ok = false;
+        } else {
+            lines.push(format!("✓ data dir writable: {}", data_dir.display()));
+        }
+    } else if !data_dir.exists() {
+        ok = false;
+        lines.push(format!(
+            "⚠ data dir {} does not exist — run `hop init` to create it",
+            data_dir.display()
+        ));
+    } else {
+        ok = false;
+        lines.push(format!(
+            "⚠ cannot read data dir {} — check permissions",
+            data_dir.display()
+        ));
     }
 
     match detect_shell_hook() {

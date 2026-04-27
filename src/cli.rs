@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use crate::completions;
 use crate::config::Config;
-use crate::db::{canonicalize_path, expand_home, now_secs, Database, HistoryRow};
+use crate::db::{canonicalize_path, default_data_dir, expand_home, now_secs, Database, HistoryRow};
 use crate::index;
 use crate::init;
 use crate::picker;
@@ -159,7 +159,13 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 return ExitCode::from(2);
             };
             let path = expand_home(arg);
-            let removed = db.forget(&path.to_string_lossy()).unwrap_or(0);
+            let removed = match db.forget(&path.to_string_lossy()) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("remove failed: {}", e);
+                    0
+                }
+            };
             if removed > 0 {
                 println!("removed: {}", path.display());
             } else {
@@ -168,14 +174,30 @@ pub fn run(args: Vec<String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         "forget" | "zap" => {
-            let query = args[2..].join(" ");
+            let dry_run = args[2..].iter().any(|a| a == "--dry-run");
+            let query: String = args[2..]
+                .iter()
+                .filter(|a| *a != "--dry-run")
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
             if query.is_empty() {
-                eprintln!("Usage: hop forget <query>");
+                eprintln!("Usage: hop forget|zap <query> [--dry-run]");
                 return ExitCode::from(2);
             }
             match find_best(&db, &cfg, &query) {
                 Some(path) => {
-                    let removed = db.forget(&path).unwrap_or(0);
+                    if dry_run {
+                        println!("would forget: {}", path);
+                        return ExitCode::SUCCESS;
+                    }
+                    let removed = match db.forget(&path) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("forget failed: {}", e);
+                            0
+                        }
+                    };
                     if removed > 0 {
                         println!("forgot: {}", path);
                     } else {
@@ -192,7 +214,13 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "book" | "bookmark" => cmd_bookmark(&db, &args[2..]),
         "history" => {
             let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
-            let rows = db.top(n).unwrap_or_default();
+            let rows = match db.top(n) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("history query failed: {}", e);
+                    return ExitCode::from(1);
+                }
+            };
             print_rows(&Database::filter_live_rows(rows));
             ExitCode::SUCCESS
         }
@@ -238,14 +266,26 @@ pub fn run(args: Vec<String>) -> ExitCode {
             cmd_update(dry_run)
         }
         "top" => {
-            let rows = db.top(10).unwrap_or_default();
-            print_rows(&Database::filter_live_rows(rows));
+            let top_rows = match db.top(10) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("top query failed: {}", e);
+                    return ExitCode::from(1);
+                }
+            };
+            print_rows(&Database::filter_live_rows(top_rows));
             ExitCode::SUCCESS
         }
         "recent" => {
             let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
-            let rows = db.recent(n).unwrap_or_default();
-            print_rows(&Database::filter_live_rows(rows));
+            let recent_rows = match db.recent(n) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("recent query failed: {}", e);
+                    return ExitCode::from(1);
+                }
+            };
+            print_rows(&Database::filter_live_rows(recent_rows));
             ExitCode::SUCCESS
         }
         "import" => {
@@ -606,15 +646,60 @@ fn cmd_stats(db: &Database, verbose: bool) -> ExitCode {
             }
             if verbose {
                 println!();
+                // DB file size
+                if let Ok(db_path) = default_data_dir().canonicalize() {
+                    if let Ok(metadata) = std::fs::metadata(&db_path) {
+                        let size_bytes = metadata.len();
+                        let size_str = if size_bytes > 1_073_741_824 {
+                            format!("{:.2} GB", size_bytes as f64 / 1_073_741_824.0)
+                        } else if size_bytes > 1_048_576 {
+                            format!("{:.2} MB", size_bytes as f64 / 1_048_576.0)
+                        } else if size_bytes > 1024 {
+                            format!("{:.2} KB", size_bytes as f64 / 1024.0)
+                        } else {
+                            format!("{} B", size_bytes)
+                        };
+                        println!("db size: {} ({})", size_str, db_path.display());
+                    }
+                }
+                // Date range of history
+                if let Ok(rows) = db.history_rows() {
+                    if !rows.is_empty() {
+                        let oldest = rows
+                            .iter()
+                            .map(|r| r.last_visited)
+                            .fold(f64::INFINITY, |a, b| a.min(b));
+                        let newest = rows
+                            .iter()
+                            .map(|r| r.last_visited)
+                            .fold(f64::NEG_INFINITY, |a, b| a.max(b));
+                        let oldest_days = (now_secs() - oldest) / 86_400.0;
+                        let newest_days = (now_secs() - newest) / 86_400.0;
+                        println!(
+                            "history range: {:.1} days ago to {:.1} days ago ({} entries)",
+                            oldest_days,
+                            newest_days,
+                            rows.len()
+                        );
+                    }
+                }
                 // Top 10 most visited dirs
-                let top10 = db.top(10).unwrap_or_default();
+                let top10 = match db.top(10) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("top query failed: {}", e);
+                        return ExitCode::from(1);
+                    }
+                };
                 let live_top10 = Database::filter_live_rows(top10);
                 if !live_top10.is_empty() {
+                    println!();
                     println!("top 10 most visited:");
                     for r in &live_top10 {
                         println!("  {:>6} visits  {}", r.visits, r.path);
                     }
                 } else {
+                    println!();
                     println!("top 10 most visited: (none)");
                 }
                 // Longest-unvisited (oldest last_visited but still in DB)
@@ -673,6 +758,15 @@ pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
         }
     }
 
+    score_candidates(db, cfg, query)
+        .into_iter()
+        .find(|c| c.score >= cfg.min_score)
+        .map(|c| c.path)
+}
+
+/// Shared helper: score all sources (bookmarks, history, index fallback)
+/// and return sorted, deduped candidates. Used by find_best and cmd_list.
+fn score_candidates(db: &Database, cfg: &Config, query: &str) -> Vec<Scored> {
     let scorer = Scorer::new(now_secs());
     let mut cands: Vec<Scored> = Vec::new();
 
@@ -712,9 +806,6 @@ pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
     cands.sort_by_key(|c| std::cmp::Reverse(c.score));
     cands.dedup_by(|a, b| a.path == b.path);
     cands
-        .into_iter()
-        .find(|c| c.score >= cfg.min_score)
-        .map(|c| c.path)
 }
 
 fn print_rows(rows: &[HistoryRow]) {
@@ -827,43 +918,7 @@ fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCod
 }
 
 fn cmd_list(db: &Database, cfg: &Config, query: &str, limit: usize, is_json: bool) -> ExitCode {
-    let scorer = Scorer::new(now_secs());
-    let mut scored: Vec<Scored> = Vec::new();
-
-    if let Ok(bms) = db.bookmarks() {
-        for (alias, path) in bms {
-            if let Some(s) = scorer.score_bookmark(&alias, &path, query) {
-                if Path::new(&s.path).is_dir() {
-                    scored.push(s);
-                }
-            }
-        }
-    }
-
-    if let Ok(rows) = db.history_rows() {
-        let (scored_history, _) = crate::score::score_history_batch(&scorer, &rows, query);
-        for s in scored_history {
-            if Path::new(&s.path).is_dir() {
-                scored.push(s);
-            }
-        }
-    }
-
-    let best_history = scored.iter().map(|c| c.score).max().unwrap_or(0);
-    if best_history < cfg.min_score * 2 {
-        if let Ok(paths) = db.index_rows() {
-            for p in paths {
-                if let Some(s) = scorer.score_indexed(&p, query) {
-                    if Path::new(&s.path).is_dir() {
-                        scored.push(s);
-                    }
-                }
-            }
-        }
-    }
-
-    scored.sort_by_key(|c| std::cmp::Reverse(c.score));
-    scored.dedup_by(|a, b| a.path == b.path);
+    let mut scored = score_candidates(db, cfg, query);
     scored.truncate(limit);
 
     if scored.is_empty() {
@@ -891,8 +946,20 @@ fn cmd_list(db: &Database, cfg: &Config, query: &str, limit: usize, is_json: boo
 }
 
 fn cmd_export(db: &Database, format: &str) -> ExitCode {
-    let history = db.history_rows().unwrap_or_default();
-    let bookmarks = db.bookmarks().unwrap_or_default();
+    let history = match db.history_rows() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("export history failed: {}", e);
+            return ExitCode::from(1);
+        }
+    };
+    let bookmarks = match db.bookmarks() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("export bookmarks failed: {}", e);
+            return ExitCode::from(1);
+        }
+    };
 
     match format {
         "json" => {
