@@ -1,14 +1,14 @@
 # hop
 
-**A smarter `cd` for your terminal.**
+**A smarter way to navigate your terminal.**
 
-Type a fragment of a directory name — `cd work` — and hop jumps you to the best match from your history. No more `cd ../../../long/path`. It learns where you go and gets better over time.
+Type a fragment of a directory name — `h work` — and hop jumps you to the best match from your history. No more `cd ../../../long/path`. It learns where you go and gets better over time.
 
 ```
-~ $ cd dl
+~ $ h dl
 ~/Downloads $
 
-~/Downloads $ cd proj
+~/Downloads $ h proj
 ~/code/work/projects $
 ```
 
@@ -16,11 +16,11 @@ Type a fragment of a directory name — `cd work` — and hop jumps you to the b
 
 ## Features
 
-- **Fuzzy matching** — `cd work`, `cd 444`, `cd abc` all work. Matches against visit frequency, recency, and bookmark priority.
+- **Fuzzy matching** — `h work`, `h 444`, `h abc` all work. Matches against visit frequency, recency, and bookmark priority.
 - **Bookmarks** — name your frequent directories with short aliases.
 - **Smart ranking** — the more you visit a folder, the higher it scores. Recent visits beat old ones.
 - **Import existing history** — pull in your zsh, fasd, autojump, zoxide, or thefuck history on first run.
-- **Interactive picker** — `hop` with no args opens a searchable picker with arrow keys.
+- **Interactive picker** — `h` or `hop` with no args opens a searchable picker with arrow keys.
 - **Self-updating** — `hop update` fetches the latest release from GitHub.
 - **Shell-agnostic** — works with Fish, Zsh, and Bash.
 - **Private** — all data stays on your machine. SQLite only.
@@ -66,7 +66,7 @@ eval "$(hop init zsh)"
 eval "$(hop init bash)"
 ```
 
-That's it — `cd` is now smart. Every directory change is recorded automatically.
+That's it — `h` is now an alias for `hop`. Every directory you visit is recorded automatically.
 
 ---
 
@@ -75,12 +75,13 @@ That's it — `cd` is now smart. Every directory change is recorded automaticall
 ### Navigate
 
 ```bash
-cd proj          # fuzzy match against your history
-cd /tmp          # real paths work as-is
-cd ..            # classics too
-cd -             # previous directory
+h proj          # fuzzy match against your history
+hop /tmp        # real paths work too
+h ..            # relative paths still work
+h -             # previous directory
 hop              # open the interactive picker
 hop pick         # same as above (shortcut: hop p)
+h                # same as above (shorter: h)
 ```
 
 ### Add and remove
@@ -99,7 +100,7 @@ hop clear --force            # wipe without asking
 hop book work ~/code/work    # create a bookmark
 hop book dot ~/.config       # short alias for a config dir
 
-cd work                     # bookmark short-circuits fuzzy matching
+h work                      # bookmark short-circuits fuzzy matching
 hop book list               # see all bookmarks
 hop book rm work            # delete a bookmark
 ```
@@ -122,7 +123,7 @@ Seed hop with your existing shell history on first install:
 hop import zsh ~/.zsh_history
 hop import fasd ~/.fasd
 hop import autojump ~/.local/share/autojump/autojump.txt
-hop import zoxide ~/.local/share/zoxide/data.zzz
+hop import zoxide ~/.local/share/zoxide/data.zzd
 hop import thefuck ~/.thefuck_config
 ```
 
@@ -162,7 +163,7 @@ Create `~/Library/Application Support/hop/config.toml` (macOS) or `~/.config/hop
 # Directories scanned during `hop reindex`
 index_roots = ["~/code", "~/work"]
 
-# Skip these during indexing (not during normal cd)
+# Skip these during indexing (not during normal h)
 skip_dirs = ["node_modules", "target", ".venv", ".git"]
 
 # How deep to walk subdirectories during reindex
@@ -183,7 +184,7 @@ Then run `hop reindex` to build the filesystem index.
 
 | Command | Description |
 |---|---|
-| `hop [query]` | Interactive picker; with query, fuzzy jumps directly |
+| `hop [query]` / `h [query]` | Interactive picker; with query, fuzzy jumps directly |
 | `hop add <path>` | Manually record a visit |
 | `hop rm <path>` | Remove a path from history |
 | `hop book [alias] [path]` | Set or resolve a bookmark |
@@ -232,7 +233,7 @@ Update your shell config from `fuzzy-cd init ...` to `hop init <shell> | source`
 ## Troubleshooting
 
 **"It doesn't find the folder I want."**
-`cd` into it the normal way a few times. Hop learns from visits. Or bookmark it directly: `hop book myproj ~/code/myproject`.
+`h` into it the normal way a few times. Hop learns from visits. Or bookmark it directly: `hop book myproj ~/code/myproject`.
 
 **"Wrong folder keeps winning."**
 Remove it from history:
