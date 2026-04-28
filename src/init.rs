@@ -41,31 +41,7 @@ function __hop_chpwd --on-variable PWD
     command hop add -- "$PWD" >/dev/null 2>&1
 end
 
-function __hop_cd
-    if test (count $argv) -eq 0
-        set -l dir (command hop pick)
-        if test -n "$dir"
-            builtin cd -- "$dir"
-        end
-        return
-    end
-    switch $argv[1]
-        case '-' '..' '.' '~' '~/'
-            builtin cd -- $argv
-            return
-    end
-    if test -d "$argv[1]"
-        builtin cd -- $argv
-        return
-    end
-    set -l dir (command hop p -- $argv)
-    if test -n "$dir"
-        builtin cd -- "$dir"
-    else
-        builtin cd -- $argv
-    end
-end
-abbr --add cd=__hop_cd
+abbr --add h=hop
 "#
         .to_string()
     } else {
@@ -74,31 +50,7 @@ function __hop_chpwd --on-variable PWD
     command hop add -- "$PWD" >/dev/null 2>&1
 end
 
-function __hop_cd
-    if test (count $argv) -eq 0
-        set -l dir (command hop pick)
-        if test -n "$dir"
-            builtin cd -- "$dir"
-        end
-        return
-    end
-    switch $argv[1]
-        case '-' '..' '.' '~' '~/'
-            builtin cd -- $argv
-            return
-    end
-    if test -d "$argv[1]"
-        builtin cd -- $argv
-        return
-    end
-    set -l dir (command hop p -- $argv)
-    if test -n "$dir"
-        builtin cd -- "$dir"
-    else
-        builtin cd -- $argv
-    end
-end
-alias cd=__hop_cd
+alias h=hop
 "#
         .to_string()
     }
@@ -163,29 +115,7 @@ case ":${PROMPT_COMMAND:-}:" in
   *) PROMPT_COMMAND="__hop_chpwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
 esac
 
-__hop_cd() {
-    if [ $# -eq 0 ]; then
-        local dir
-        dir=$(command hop pick)
-        [ -n "$dir" ] && builtin cd -- "$dir"
-        return
-    fi
-    case "$1" in
-        -|..|.|~|~/) builtin cd -- "$@"; return ;;
-    esac
-    if [ -d "$1" ]; then
-        builtin cd -- "$@"
-        return
-    fi
-    local dir
-    dir=$(command hop p -- "$@")
-    if [ -n "$dir" ]; then
-        builtin cd -- "$dir"
-    else
-        builtin cd -- "$@"
-    fi
-}
-alias cd='__hop_cd'
+alias h=hop
 "#;
 
 const ZSH: &str = r#"# hop zsh integration
@@ -193,49 +123,7 @@ autoload -U add-zsh-hook
 __hop_chpwd() { command hop add -- "$PWD" >/dev/null 2>&1 }
 add-zsh-hook chpwd __hop_chpwd
 
-__hop_cd() {
-    if (( $# == 0 )); then
-        local dir
-        dir=$(command hop pick)
-        [[ -n "$dir" ]] && builtin cd -- "$dir"
-        return
-    fi
-    case "$1" in
-        -|..|.|~|~/) builtin cd -- "$@"; return ;;
-    esac
-    if [[ -d "$1" ]]; then
-        builtin cd -- "$@"
-        return
-    fi
-    local dir
-    dir=$(command hop p -- "$@")
-    if [[ -n "$dir" ]]; then
-        builtin cd -- "$dir"
-    else
-        builtin cd -- "$@"
-    fi
-}
-
-# A named function "cd" preserves "cd" as the command name (not __hop_cd),
-# so zsh looks for "cd" completions.  compdef _hop_cd cd registers our
-# custom _hop_cd function (defined below) as the completion handler for cd.
-function cd() { __hop_cd "$@"; }
-
-# _hop_cd: completion function for cd.
-# Uses compadd to complete directory names — no dependency on _cd or compinit.
-_hop_cd() {
-    local -a dirs
-    # Collect directories from CDPATH entries and current dir
-    local cdpath_entry
-    for cdpath_entry in ${(s,:,)CDPATH}; do
-        dirs+=($(compgen -d -- "${cdpath_entry:-$PWD}/"))
-    done
-    # Complete from current directory
-    dirs+=($(compgen -d -- ./))
-    compadd -a dirs
-}
-
-compdef _hop_cd cd
+alias h=hop
 "#;
 
 #[cfg(test)]
@@ -255,7 +143,7 @@ mod tests {
         for shell in ["bash", "zsh", "fish"] {
             let s = script_for(shell).unwrap();
             assert!(s.contains("command hop"), "{shell} missing binary call");
-            assert!(s.contains("__hop_cd"), "{shell} missing cd wrapper");
+            assert!(s.contains("alias h=hop"), "{shell} missing h alias");
             assert!(!s.contains("fuzzy-cd"), "{shell} still references old name");
         }
     }
