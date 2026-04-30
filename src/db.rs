@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::score::basename_lower;
+
 use directories::ProjectDirs;
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -190,7 +192,7 @@ impl Database {
                     .flatten()
                     .collect();
                 for (id, path) in paths {
-                    let base = basename_of(&path);
+                    let base = basename_lower(&path);
                     self.conn.execute(
                         "UPDATE history SET basename = ?1 WHERE id = ?2",
                         params![base, id],
@@ -221,7 +223,7 @@ impl Database {
         // Resolve symlinks to canonical path so /link/to/project and
         // /real/project share one history row.
         let canonical = canonicalize_path(path).unwrap_or_else(|| path.to_owned());
-        let basename = basename_of(&canonical);
+        let basename = basename_lower(&canonical);
         let is_git = Path::new(&canonical).join(".git").exists() as i64;
         self.conn.execute(
             "INSERT INTO history (path, basename, visits, last_visited, created_at, is_git_repo)
@@ -466,7 +468,7 @@ impl Database {
     }
 
     pub fn upsert_indexed_dir(&self, path: &str) -> rusqlite::Result<()> {
-        let basename = basename_of(path);
+        let basename = basename_lower(path);
         let parent = Path::new(path)
             .parent()
             .map(|p| p.to_string_lossy().into_owned())
@@ -477,6 +479,24 @@ impl Database {
              ON CONFLICT(path) DO UPDATE SET basename = ?2, parent = ?3, indexed_at = ?4",
             params![path, basename, parent, now_secs()],
         )?;
+        Ok(())
+    }
+
+    pub fn batch_upsert_indexed_dirs(&self, paths: &[String]) -> rusqlite::Result<()> {
+        let now = now_secs();
+        for path in paths {
+            let basename = basename_lower(path);
+            let parent = Path::new(path)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.conn.execute(
+                "INSERT INTO dir_index(path, basename, parent, indexed_at)
+                 VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(path) DO UPDATE SET basename = ?2, parent = ?3, indexed_at = ?4",
+                params![path, basename, parent, now],
+            )?;
+        }
         Ok(())
     }
 
@@ -540,13 +560,6 @@ pub struct DbCounts {
     pub bookmarks: i64,
     pub indexed: i64,
     pub top_path: Option<String>,
-}
-
-pub fn basename_of(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -621,7 +634,7 @@ mod tests {
 
     #[test]
     fn basename_lowercased() {
-        assert_eq!(basename_of("/Users/Foo/Bar"), "bar");
+        assert_eq!(basename_lower("/Users/Foo/Bar"), "bar");
     }
 
     #[test]
@@ -692,5 +705,122 @@ mod tests {
         assert!(!hist.contains(&alive_s));
         // alive/dead are in history, index is empty
         assert!(idx.is_empty());
+    }
+
+    #[test]
+    fn prune_stale_batch_empty_db_removes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+        let removed = db.prune_stale_batch(10, |_, _| {}).unwrap();
+        assert_eq!(removed, 0, "empty DB should remove nothing");
+    }
+
+    #[test]
+    fn prune_stale_batch_all_stale_removes_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+
+        // Create two directories then delete them
+        let dir1 = tmp.path().join("stale1");
+        let dir2 = tmp.path().join("stale2");
+        std::fs::create_dir(&dir1).unwrap();
+        std::fs::create_dir(&dir2).unwrap();
+
+        let s1 = canonicalize_path(dir1.to_str().unwrap()).unwrap();
+        let s2 = canonicalize_path(dir2.to_str().unwrap()).unwrap();
+        db.record_visit(&s1).unwrap();
+        db.record_visit(&s2).unwrap();
+
+        // Delete both directories
+        std::fs::remove_dir(&dir1).unwrap();
+        std::fs::remove_dir(&dir2).unwrap();
+
+        let removed = db.prune_stale_batch(10, |_, _| {}).unwrap();
+        assert_eq!(removed, 2, "all stale entries should be removed");
+        assert_eq!(db.history_rows().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn prune_stale_batch_none_stale_removes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+
+        // Create and visit valid directories
+        let dir1 = tmp.path().join("alive1");
+        let dir2 = tmp.path().join("alive2");
+        std::fs::create_dir(&dir1).unwrap();
+        std::fs::create_dir(&dir2).unwrap();
+
+        let d1 = canonicalize_path(dir1.to_str().unwrap()).unwrap();
+        let d2 = canonicalize_path(dir2.to_str().unwrap()).unwrap();
+        db.record_visit(&d1).unwrap();
+        db.record_visit(&d2).unwrap();
+
+        let removed = db.prune_stale_batch(10, |_, _| {}).unwrap();
+        assert_eq!(removed, 0, "no stale entries should be removed");
+        assert_eq!(db.history_rows().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn prune_stale_batch_mix_stale_and_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+
+        // Create one alive and one dead directory
+        let alive = tmp.path().join("alive");
+        let dead = tmp.path().join("dead");
+        std::fs::create_dir(&alive).unwrap();
+        std::fs::create_dir(&dead).unwrap();
+
+        let alive_s = canonicalize_path(alive.to_str().unwrap()).unwrap();
+        let dead_s = canonicalize_path(dead.to_str().unwrap()).unwrap();
+        db.record_visit(&alive_s).unwrap();
+        db.record_visit(&dead_s).unwrap();
+
+        // Delete the dead directory
+        std::fs::remove_dir(&dead).unwrap();
+
+        let removed = db.prune_stale_batch(10, |_, _| {}).unwrap();
+        assert_eq!(removed, 1, "only stale entry should be removed");
+        assert_eq!(db.history_rows().unwrap().len(), 1);
+        assert_eq!(db.history_rows().unwrap()[0].path, alive_s);
+    }
+
+    #[test]
+    fn counts_after_inserting_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
+
+        // Empty DB
+        let c = db.counts().unwrap();
+        assert_eq!(c.total, 0);
+        assert_eq!(c.total_visits, 0);
+
+        // Insert a path once
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir(&dir).unwrap();
+        let dir_s = canonicalize_path(dir.to_str().unwrap()).unwrap();
+        db.record_visit(&dir_s).unwrap();
+
+        let c = db.counts().unwrap();
+        assert_eq!(c.total, 1, "total should be 1");
+        assert_eq!(c.total_visits, 1, "total_visits should be 1");
+
+        // Visit same path again
+        db.record_visit(&dir_s).unwrap();
+
+        let c = db.counts().unwrap();
+        assert_eq!(c.total, 1, "total should still be 1 (same path)");
+        assert_eq!(c.total_visits, 2, "total_visits should be 2");
+
+        // Add another path
+        let dir2 = tmp.path().join("proj2");
+        std::fs::create_dir(&dir2).unwrap();
+        let dir2_s = canonicalize_path(dir2.to_str().unwrap()).unwrap();
+        db.record_visit(&dir2_s).unwrap();
+
+        let c = db.counts().unwrap();
+        assert_eq!(c.total, 2, "total should be 2");
+        assert_eq!(c.total_visits, 3, "total_visits should be 3 (2 + 1)");
     }
 }

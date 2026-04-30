@@ -213,7 +213,7 @@ fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
         }
         if let Ok(rows) = db.history_rows() {
             for r in rows {
-                if let Some(s) = scorer.score_history(&r, query) {
+                if let Some(s) = scorer.score_history(&r, query, None) {
                     if std::path::Path::new(&s.path).is_dir() {
                         candidates.push(s);
                     }

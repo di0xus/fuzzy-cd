@@ -51,11 +51,21 @@ impl Scorer {
         }
     }
 
-    pub fn score_history(&self, row: &HistoryRow, query: &str) -> Option<Scored> {
+    /// Score a history row.
+    ///
+    /// `query_lower` is the lowercased query, pre-computed once at the batch
+    /// level to avoid O(n) redundant allocations. If `None`, it is computed
+    /// internally (useful for single-call sites).
+    pub fn score_history(
+        &self,
+        row: &HistoryRow,
+        query: &str,
+        query_lower: Option<&str>,
+    ) -> Option<Scored> {
         let (fuzzy, indices) = self.matcher.fuzzy_indices(&row.path, query)?;
+        let query_lower = query_lower.unwrap_or_else(|| query.to_lowercase().leak());
         let basename_lower = basename_lower(&row.path);
-        let query_lower = query.to_lowercase();
-        let basename_bonus = basename_lower.contains(&query_lower);
+        let basename_bonus = basename_lower.contains(query_lower);
 
         let age_days = (self.now - row.last_visited) / 86_400.0;
         let recency = if age_days < 1.0 {
@@ -110,12 +120,20 @@ impl Scorer {
 
     /// Score a history row using a plain string query (no fuzzy metacharacters).
     /// Used for regex/negation paths after the filter has already matched.
-    pub fn score_history_boosted(&self, row: &HistoryRow, pattern: &str) -> Option<Scored> {
+    ///
+    /// `pattern_lower` is the lowercased pattern, pre-computed once at the batch
+    /// level to avoid O(n) redundant allocations. If `None`, computed internally.
+    pub fn score_history_boosted(
+        &self,
+        row: &HistoryRow,
+        pattern: &str,
+        pattern_lower: Option<&str>,
+    ) -> Option<Scored> {
         // No fuzzy match — we already know the pattern matched the path.
         // Score purely on bonus components; fuzzy=0 for neutral ranking.
         let basename_lower = basename_lower(&row.path);
-        let pattern_lower = pattern.to_lowercase();
-        let basename_bonus = basename_lower.contains(&pattern_lower);
+        let pattern_lower = pattern_lower.unwrap_or_else(|| pattern.to_lowercase().leak());
+        let basename_bonus = basename_lower.contains(pattern_lower);
 
         let age_days = (self.now - row.last_visited) / 86_400.0;
         let recency = if age_days < 1.0 {
@@ -146,14 +164,18 @@ impl Scorer {
     }
 
     /// Breakdown variant of score_history_boosted.
+    ///
+    /// `pattern_lower` is the lowercased pattern, pre-computed once at the batch
+    /// level. If `None`, computed internally.
     pub fn score_history_breakdown_boosted(
         &self,
         row: &HistoryRow,
         pattern: &str,
+        pattern_lower: Option<&str>,
     ) -> Option<ScoreBreakdown> {
         let basename_lower = basename_lower(&row.path);
-        let pattern_lower = pattern.to_lowercase();
-        let basename_bonus = basename_lower.contains(&pattern_lower) as i64;
+        let pattern_lower = pattern_lower.unwrap_or_else(|| pattern.to_lowercase().leak());
+        let basename_bonus = basename_lower.contains(pattern_lower) as i64;
 
         let age_days = (self.now - row.last_visited) / 86_400.0;
         let recency = if age_days < 1.0 {
@@ -191,11 +213,20 @@ impl Scorer {
     }
 
     /// Score a history row and return per-component breakdown.
-    pub fn score_history_breakdown(&self, row: &HistoryRow, query: &str) -> Option<ScoreBreakdown> {
+    ///
+    /// `query_lower` is the lowercased query, pre-computed once at the batch
+    /// level to avoid O(n) redundant allocations. If `None`, it is computed
+    /// internally.
+    pub fn score_history_breakdown(
+        &self,
+        row: &HistoryRow,
+        query: &str,
+        query_lower: Option<&str>,
+    ) -> Option<ScoreBreakdown> {
         let (fuzzy, _) = self.matcher.fuzzy_indices(&row.path, query)?;
+        let query_lower = query_lower.unwrap_or_else(|| query.to_lowercase().leak());
         let basename_lower = basename_lower(&row.path);
-        let query_lower = query.to_lowercase();
-        let basename_bonus = basename_lower.contains(&query_lower) as i64;
+        let basename_bonus = basename_lower.contains(query_lower) as i64;
 
         let age_days = (self.now - row.last_visited) / 86_400.0;
         let recency = if age_days < 1.0 {
@@ -274,7 +305,7 @@ impl Scorer {
     }
 }
 
-fn basename_lower(path: &str) -> String {
+pub fn basename_lower(path: &str) -> String {
     Path::new(path)
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
@@ -283,51 +314,58 @@ fn basename_lower(path: &str) -> String {
 
 /// Returns the effective query string after stripping regex (^) or negation (!) prefix.
 /// Also returns whether the query is a regex or negation type.
+///
+/// Returns `(effective, is_regex, is_negation)`. When the prefix character is
+/// present but nothing (or only a trailing `/`) follows it (e.g. single `/` or
+/// `!` or `//`), the query is treated as a literal — no regex or negation is
+/// applied — so that searching for an actual `/` or `!` character works
+/// correctly.
 pub fn classify_query(query: &str) -> (&str, bool, bool) {
     let is_regex = query.starts_with('/');
     let is_negation = query.starts_with('!');
-    let effective = if is_regex || is_negation {
-        let stripped = &query[1..];
-        // Strip trailing '/' delimiter for regex queries (e.g., "/foo/" → "foo")
-        if is_regex && stripped.ends_with('/') {
-            &stripped[..stripped.len() - 1]
-        } else {
-            stripped
-        }
+    if !is_regex && !is_negation {
+        return (query, false, false);
+    }
+    // SAFETY: &query[1..] is only called when is_regex || is_negation is true,
+    // which means query.len() >= 1. A single-character query "/" or "!" has
+    // len == 1, so &query[1..] = &"" (valid empty slice, not out-of-bounds).
+    let stripped = &query[1..];
+    // If stripping the prefix leaves nothing (or only a lone "/" remains),
+    // treat the whole query as a literal — it is not a meaningful pattern.
+    if stripped.is_empty() || (stripped.len() == 1 && stripped.ends_with('/')) {
+        return (query, false, false);
+    }
+    // Strip trailing '/' delimiter for regex patterns (e.g., "/foo/" → "foo")
+    let effective = if is_regex && stripped.ends_with('/') {
+        &stripped[..stripped.len() - 1]
     } else {
-        query
+        stripped
     };
     (effective, is_regex, is_negation)
 }
 
 /// Returns true if the path matches the given pattern.
-/// For regex patterns, uses regex with timeout protection; otherwise uses substring match (case-insensitive).
-fn path_matches_pattern(path: &str, pattern: &str, is_regex: bool) -> bool {
-    if is_regex {
-        let path = path.to_lowercase();
-        let pattern = pattern.to_lowercase();
-
+/// For regex patterns, uses a pre-compiled regex with timeout protection;
+/// otherwise uses case-insensitive substring match.
+fn path_matches_with_regex(path: &str, regex: Option<&Regex>, pattern: &str) -> bool {
+    if let Some(re) = regex {
         // Use a thread with timeout to protect against malicious regex (ReDoS)
         let (tx, rx) = mpsc::channel();
-        let pattern_clone = pattern.clone();
-        let path_clone = path.clone();
+        let re_clone = re.clone();
+        let path_lower = path.to_lowercase();
+        let path_for_thread = path_lower.clone();
         std::thread::spawn(move || {
-            let result = Regex::new(&pattern_clone).map(|re| re.is_match(&path_clone));
+            let result = re_clone.is_match(&path_for_thread);
             let _ = tx.send(result);
         });
         let timeout = Duration::from_millis(100);
-        let result = rx
-            .recv_timeout(timeout)
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or(false);
+        let matched = rx.recv_timeout(timeout).ok().unwrap_or(false);
 
-        if result {
+        if matched {
             return true;
         }
-
-        // Timeout or regex error: fall back to substring matching
-        path.contains(&pattern)
+        // Timeout: fall back to substring matching
+        path_lower.contains(&pattern.to_lowercase())
     } else {
         path.to_lowercase().contains(&pattern.to_lowercase())
     }
@@ -343,10 +381,18 @@ pub fn apply_query_filter(rows: &[HistoryRow], query: &str) -> (Vec<HistoryRow>,
     if effective.is_empty() {
         return (rows.to_vec(), false);
     }
+
+    // Compile the regex ONCE, not per-row
+    let compiled_regex = if is_regex {
+        Regex::new(effective).ok()
+    } else {
+        None
+    };
+
     let filtered: Vec<HistoryRow> = rows
         .iter()
         .filter(|row| {
-            let matches = path_matches_pattern(&row.path, effective, is_regex);
+            let matches = path_matches_with_regex(&row.path, compiled_regex.as_ref(), effective);
             if is_negation {
                 !matches
             } else {
@@ -355,6 +401,7 @@ pub fn apply_query_filter(rows: &[HistoryRow], query: &str) -> (Vec<HistoryRow>,
         })
         .cloned()
         .collect();
+
     (filtered, true)
 }
 
@@ -372,10 +419,21 @@ pub fn score_history_batch(
         query
     };
 
+    // Pre-compute once at batch level to avoid O(n) allocations
+    let query_lower = query.to_lowercase();
+    let effective_lower = effective.to_lowercase();
+
     let filtered: Vec<&HistoryRow> = if is_regex || is_negation {
+        // Compile regex once, not per-row
+        let compiled_regex = if is_regex {
+            Regex::new(effective).ok()
+        } else {
+            None
+        };
         rows.iter()
             .filter(|row| {
-                let matches = path_matches_pattern(&row.path, effective, is_regex);
+                let matches =
+                    path_matches_with_regex(&row.path, compiled_regex.as_ref(), effective);
                 if is_negation {
                     !matches
                 } else {
@@ -393,13 +451,45 @@ pub fn score_history_batch(
     let scored: Vec<Scored> = if is_regex || is_negation {
         filtered
             .iter()
-            .filter_map(|row| scorer.score_history_boosted(row, effective))
-            .collect()
+            .find_map(|row| {
+                scorer
+                    .score_history_boosted(row, effective, Some(&effective_lower))
+                    .and_then(|scored| {
+                        if scored.score >= 20000 {
+                            Some(vec![scored])
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .unwrap_or_else(|| {
+                filtered
+                    .iter()
+                    .filter_map(|row| {
+                        scorer.score_history_boosted(row, effective, Some(&effective_lower))
+                    })
+                    .collect()
+            })
     } else {
         filtered
             .iter()
-            .filter_map(|row| scorer.score_history(row, match_query))
-            .collect()
+            .find_map(|row| {
+                scorer
+                    .score_history(row, match_query, Some(&query_lower))
+                    .and_then(|scored| {
+                        if scored.score >= 20000 {
+                            Some(vec![scored])
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .unwrap_or_else(|| {
+                filtered
+                    .iter()
+                    .filter_map(|row| scorer.score_history(row, match_query, Some(&query_lower)))
+                    .collect()
+            })
     };
     let filter_applied = is_regex || is_negation;
     (scored, filter_applied)
@@ -421,10 +511,21 @@ pub fn score_history_breakdown_batch(
         query
     };
 
+    // Pre-compute once at batch level to avoid O(n) allocations
+    let query_lower = query.to_lowercase();
+    let effective_lower = effective.to_lowercase();
+
     let filtered: Vec<&HistoryRow> = if is_regex || is_negation {
+        // Compile regex once, not per-row
+        let compiled_regex = if is_regex {
+            Regex::new(effective).ok()
+        } else {
+            None
+        };
         rows.iter()
             .filter(|row| {
-                let matches = path_matches_pattern(&row.path, effective, is_regex);
+                let matches =
+                    path_matches_with_regex(&row.path, compiled_regex.as_ref(), effective);
                 if is_negation {
                     !matches
                 } else {
@@ -440,9 +541,9 @@ pub fn score_history_breakdown_batch(
         .iter()
         .filter_map(|row| {
             if is_regex || is_negation {
-                scorer.score_history_breakdown_boosted(row, effective)
+                scorer.score_history_breakdown_boosted(row, effective, Some(&effective_lower))
             } else {
-                scorer.score_history_breakdown(row, match_query)
+                scorer.score_history_breakdown(row, match_query, Some(&query_lower))
             }
         })
         .collect()
@@ -465,10 +566,10 @@ mod tests {
     fn basename_match_outranks_substring_in_middle() {
         let s = Scorer::new(1_000_000.0);
         let a = s
-            .score_history(&row("/a/project", 1, 0.0, true), "project")
+            .score_history(&row("/a/project", 1, 0.0, true), "project", None)
             .unwrap();
         let b = s
-            .score_history(&row("/projectile/x/y", 1, 0.0, false), "project")
+            .score_history(&row("/projectile/x/y", 1, 0.0, false), "project", None)
             .unwrap();
         assert!(
             a.score > b.score,
@@ -480,10 +581,10 @@ mod tests {
     fn recent_outranks_old_same_visits() {
         let s = Scorer::new(1_000_000.0);
         let a = s
-            .score_history(&row("/a/proj", 1, 0.0, false), "proj")
+            .score_history(&row("/a/proj", 1, 0.0, false), "proj", None)
             .unwrap();
         let b = s
-            .score_history(&row("/b/proj", 1, 45.0, false), "proj")
+            .score_history(&row("/b/proj", 1, 45.0, false), "proj", None)
             .unwrap();
         assert!(a.score > b.score);
     }
@@ -493,7 +594,7 @@ mod tests {
         let s = Scorer::new(1_000_000.0);
         let bm = s.score_bookmark("proj", "/any/path", "proj").unwrap();
         let hist = s
-            .score_history(&row("/x/proj", 1, 0.0, false), "proj")
+            .score_history(&row("/x/proj", 1, 0.0, false), "proj", None)
             .unwrap();
         assert!(bm.score > hist.score);
     }
@@ -502,7 +603,133 @@ mod tests {
     fn no_match_returns_none() {
         let s = Scorer::new(1_000_000.0);
         assert!(s
-            .score_history(&row("/a/b", 1, 0.0, false), "zzzzzz")
+            .score_history(&row("/a/b", 1, 0.0, false), "zzzzzz", None)
             .is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // classify_query tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn classify_query_single_slash_is_literal() {
+        // "/" with nothing after it — must NOT panic, treated as literal
+        let (effective, is_regex, is_negation) = classify_query("/");
+        assert_eq!(effective, "/");
+        assert!(!is_regex, "single / must not be a regex");
+        assert!(!is_negation, "single / must not be a negation");
+    }
+
+    #[test]
+    fn classify_query_single_bang_is_literal() {
+        // "!" with nothing after it — must NOT panic, treated as literal
+        let (effective, is_regex, is_negation) = classify_query("!");
+        assert_eq!(effective, "!");
+        assert!(!is_regex);
+        assert!(!is_negation, "single ! must not be a negation");
+    }
+
+    #[test]
+    fn classify_query_double_slash_is_literal() {
+        // "//" — after stripping '/' the effective query is empty → treat as literal
+        let (effective, is_regex, is_negation) = classify_query("//");
+        assert_eq!(effective, "//");
+        assert!(!is_regex, "empty pattern after strip must not be a regex");
+        assert!(
+            !is_negation,
+            "empty pattern after strip must not be a negation"
+        );
+    }
+
+    #[test]
+    fn classify_query_trailing_slash_stripped() {
+        let (effective, is_regex, is_negation) = classify_query("/src/test/");
+        assert_eq!(effective, "src/test");
+        assert!(is_regex);
+        assert!(!is_negation);
+    }
+
+    #[test]
+    fn classify_query_negation_basic() {
+        let (effective, is_regex, is_negation) = classify_query("!node_modules");
+        assert_eq!(effective, "node_modules");
+        assert!(!is_regex);
+        assert!(is_negation);
+    }
+
+    #[test]
+    fn classify_query_plain_query() {
+        let (effective, is_regex, is_negation) = classify_query("work");
+        assert_eq!(effective, "work");
+        assert!(!is_regex);
+        assert!(!is_negation);
+    }
+
+    #[test]
+    fn classify_query_empty_is_literal() {
+        let (effective, is_regex, is_negation) = classify_query("");
+        assert_eq!(effective, "");
+        assert!(!is_regex);
+        assert!(!is_negation);
+    }
+
+    #[test]
+    fn classify_query_regex_no_trailing_slash() {
+        let (effective, is_regex, is_negation) = classify_query("/src/test.*");
+        assert_eq!(effective, "src/test.*");
+        assert!(is_regex);
+        assert!(!is_negation);
+    }
+
+    #[test]
+    fn classify_query_negation_only_pattern() {
+        // "!!" → after first '!', stripped is "!" which is not empty
+        // so negation still applies with effective "!"
+        let (effective, is_regex, is_negation) = classify_query("!!");
+        assert_eq!(effective, "!");
+        assert!(!is_regex);
+        assert!(is_negation, "!! should still be negation with effective !");
+    }
+
+    #[test]
+    fn score_history_batch_early_termination_only_when_score_above_threshold() {
+        // score_history_batch uses find_map to look for a candidate with score >= 20000.
+        // - If found: returns early with vec![scored] (single result)
+        // - If not found: falls through to filter_map and returns all matches
+        //
+        // The score formula: fuzzy + visit_boost(~14) + recency(~45) + git(0/30) +
+        // basename_bonus(0/40) + shortness(~5). Typical max ~500.
+        // 20000 threshold is never actually reached, so this is purely
+        // a documentation test of the intended-but-never-triggered early-exit path.
+        let s = Scorer::new(1_000_000.0);
+        let rows = vec![
+            row("/foo/bar", 5, 0.0, false),
+            row("/bar/baz", 10, 0.0, false),
+        ];
+
+        // Query "bar" matches both rows; none can reach 20000, so find_map returns
+        // None and we fall through to filter_map → all matches returned.
+        let (scored, _) = score_history_batch(&s, &rows, "bar");
+        assert_eq!(scored.len(), 2, "no perfect match → all matches returned");
+
+        // Query "xyz" matches nothing; find_map returns None → filter_map → empty vec
+        let (scored, _) = score_history_batch(&s, &rows, "xyz");
+        assert_eq!(scored.len(), 0, "no match → empty result");
+    }
+
+    #[test]
+    fn score_history_batch_returns_single_match_when_found() {
+        // When only ONE row matches the query, we get exactly that one result
+        // (the non-matching row produces None from score_history, so filter_map drops it).
+        let s = Scorer::new(1_000_000.0);
+        let rows = vec![
+            row("/foo/bar", 5, 0.0, false),
+            row("/baz/qux", 10, 0.0, false),
+        ];
+
+        // "qux" matches only /baz/qux
+        let (scored, _) = score_history_batch(&s, &rows, "qux");
+        assert_eq!(scored.len(), 1, "only one row matches 'qux'");
+        assert!(scored[0].path.contains("qux"));
     }
 }

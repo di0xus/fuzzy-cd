@@ -3,6 +3,98 @@ use std::path::{Path, PathBuf};
 
 use crate::db::{expand_home, Database};
 
+/// Maximum size (in bytes) of an import file. A 10 GB zsh history file should
+/// not be loaded into memory. 50 MB is a generous limit for any realistic
+/// history or cache file.
+pub const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+/// Errors that can occur during an import operation.
+#[derive(Debug)]
+pub enum ImportError {
+    /// The import file exceeds MAX_FILE_SIZE and was rejected to prevent OOM.
+    FileTooLarge { size: u64, max: u64 },
+    /// The file does not exist or could not be read.
+    Io(std::io::Error),
+}
+
+impl Clone for ImportError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::FileTooLarge { size, max } => Self::FileTooLarge {
+                size: *size,
+                max: *max,
+            },
+            Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
+        }
+    }
+}
+
+impl PartialEq for ImportError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::FileTooLarge { size: l, max: lm }, Self::FileTooLarge { size: r, max: rm }) => {
+                l == r && lm == rm
+            }
+            (Self::Io(l), Self::Io(r)) => l.to_string() == r.to_string(),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ImportError {}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportError::FileTooLarge { size, max } => {
+                write!(
+                    f,
+                    "import file is {} bytes (max {} MB); refusing to read to prevent OOM",
+                    size,
+                    max / (1024 * 1024)
+                )
+            }
+            ImportError::Io(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for ImportError {}
+
+impl From<std::io::Error> for ImportError {
+    fn from(e: std::io::Error) -> Self {
+        ImportError::Io(e)
+    }
+}
+
+/// Check that `path` is smaller than MAX_FILE_SIZE before reading.
+/// Returns `Err(ImportError::FileTooLarge)` if the file is too big;
+/// returns `Ok(())` if reading may proceed.
+fn check_file_size(path: &Path) -> Result<(), ImportError> {
+    let size = fs::metadata(path)?.len();
+    if size > MAX_FILE_SIZE {
+        return Err(ImportError::FileTooLarge {
+            size,
+            max: MAX_FILE_SIZE,
+        });
+    }
+    Ok(())
+}
+
+/// Read the full contents of `path` as a `String`, but only after checking
+/// that the file is smaller than MAX_FILE_SIZE.
+fn read_to_string(path: &Path) -> Result<String, ImportError> {
+    check_file_size(path)?;
+    fs::read_to_string(path).map_err(ImportError::Io)
+}
+
+/// Read the full contents of `path` as raw bytes, but only after checking
+/// that the file is smaller than MAX_FILE_SIZE.
+fn read_bytes(path: &Path) -> Result<Vec<u8>, ImportError> {
+    check_file_size(path)?;
+    fs::read(path).map_err(ImportError::Io)
+}
+
 pub struct ImportStats {
     pub imported: usize,
     pub skipped: usize,
@@ -10,22 +102,22 @@ pub struct ImportStats {
 
 /// Parse an import file and return a preview of what would be imported,
 /// WITHOUT writing to the database. Returns list of paths that would be imported.
-pub fn import_dry_run(source: &str, path: &Path) -> std::io::Result<Vec<String>> {
+pub fn import_dry_run(source: &str, path: &Path) -> Result<Vec<String>, ImportError> {
     match source {
         "fasd" => dry_run_fasd(path),
         "autojump" => dry_run_autojump(path),
         "zoxide" => dry_run_zoxide(path),
         "zsh" => dry_run_zsh(path),
         "thefuck" => dry_run_thefuck(path),
-        _ => Err(std::io::Error::new(
+        _ => Err(ImportError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unknown source: {}", source),
-        )),
+        ))),
     }
 }
 
-fn dry_run_fasd(path: &Path) -> std::io::Result<Vec<String>> {
-    let content = fs::read_to_string(path)?;
+fn dry_run_fasd(path: &Path) -> Result<Vec<String>, ImportError> {
+    let content = read_to_string(path)?;
     let mut result = Vec::new();
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -44,8 +136,8 @@ fn dry_run_fasd(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(result)
 }
 
-fn dry_run_autojump(path: &Path) -> std::io::Result<Vec<String>> {
-    let content = fs::read_to_string(path)?;
+fn dry_run_autojump(path: &Path) -> Result<Vec<String>, ImportError> {
+    let content = read_to_string(path)?;
     let mut result = Vec::new();
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -64,10 +156,11 @@ fn dry_run_autojump(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(result)
 }
 
-fn dry_run_zoxide(path: &Path) -> std::io::Result<Vec<String>> {
+fn dry_run_zoxide(path: &Path) -> Result<Vec<String>, ImportError> {
     use rmp_serde::Deserializer;
     use serde::Deserialize;
-    let data = fs::read(path)?;
+
+    let data = read_bytes(path)?;
     let mut result = Vec::new();
 
     #[derive(Debug, Deserialize)]
@@ -96,8 +189,8 @@ fn dry_run_zoxide(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(result)
 }
 
-fn dry_run_zsh(path: &Path) -> std::io::Result<Vec<String>> {
-    let content = fs::read_to_string(path)?;
+fn dry_run_zsh(path: &Path) -> Result<Vec<String>, ImportError> {
+    let content = read_to_string(path)?;
     let commands = parse_zsh_history(&content);
     let mut result = Vec::new();
     for cmd in commands {
@@ -111,8 +204,8 @@ fn dry_run_zsh(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(result)
 }
 
-fn dry_run_thefuck(path: &Path) -> std::io::Result<Vec<String>> {
-    let content = fs::read_to_string(path)?;
+fn dry_run_thefuck(path: &Path) -> Result<Vec<String>, ImportError> {
+    let content = read_to_string(path)?;
     let mut result = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
@@ -139,8 +232,8 @@ fn dry_run_thefuck(path: &Path) -> std::io::Result<Vec<String>> {
 }
 
 /// fasd `.fasd` cache is tab-separated: `path\tvisits\tlast`.
-pub fn import_fasd(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
-    let content = fs::read_to_string(path)?;
+pub fn import_fasd(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
+    let content = read_to_string(path)?;
     let mut stats = ImportStats {
         imported: 0,
         skipped: 0,
@@ -178,8 +271,8 @@ pub fn import_fasd(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
 ///   plain:    `cd ~/foo`
 ///   extended: `: 1700000000:0;cd ~/foo`
 /// Multi-line commands (trailing `\`) are concatenated.
-pub fn import_zsh(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
-    let content = fs::read_to_string(path)?;
+pub fn import_zsh(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
+    let content = read_to_string(path)?;
     let commands = parse_zsh_history(&content);
     let mut stats = ImportStats {
         imported: 0,
@@ -318,8 +411,8 @@ fn is_existing_dir(p: &PathBuf) -> bool {
 
 /// autojump "~/.local/share/autojump/autojump.txt" — one line per dir:
 /// `weight\tpath`
-pub fn import_autojump(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
-    let content = fs::read_to_string(path)?;
+pub fn import_autojump(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
+    let content = read_to_string(path)?;
     let mut stats = ImportStats {
         imported: 0,
         skipped: 0,
@@ -356,16 +449,17 @@ pub fn import_autojump(db: &Database, path: &Path) -> std::io::Result<ImportStat
 
 /// zoxide "~/.local/share/zoxide/db.zo" — msgpack format.
 /// Each entry is an array: [path (str), score (f64), ...]
-pub fn import_zoxide(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
-    let data = fs::read(path)?;
+pub fn import_zoxide(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
+    use rmp_serde::Deserializer;
+    use serde::Deserialize;
+
+    let data = read_bytes(path)?;
     let mut stats = ImportStats {
         imported: 0,
         skipped: 0,
     };
 
     // Try to decode as an array of [path, score] arrays
-    use rmp_serde::Deserializer;
-    use serde::Deserialize;
     #[derive(Debug, Deserialize)]
     #[allow(dead_code)]
     struct ZoxideEntry(String, f64);
@@ -406,8 +500,8 @@ pub fn import_zoxide(db: &Database, path: &Path) -> std::io::Result<ImportStats>
 /// thefuck alias import — parses shell alias lines from a file and offers
 /// directories mentioned in alias targets as bookmarks.
 /// Looks for `alias <name>='cd <path>'` or `alias <name>="cd <path>"` patterns.
-pub fn import_thefuck(db: &Database, path: &Path) -> std::io::Result<ImportStats> {
-    let content = fs::read_to_string(path)?;
+pub fn import_thefuck(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
+    let content = read_to_string(path)?;
     let mut stats = ImportStats {
         imported: 0,
         skipped: 0,
