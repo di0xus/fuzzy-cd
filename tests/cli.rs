@@ -25,7 +25,12 @@ fn init_emits_scripts() {
         assert!(out.status.success(), "init {shell} failed");
         let s = String::from_utf8_lossy(&out.stdout);
         assert!(s.contains("command hop"), "init {shell} missing hop call");
-        assert!(s.contains("alias h=hop"), "init {shell} missing h alias");
+        let has_h = if shell == "fish" {
+            s.contains("function h")
+        } else {
+            s.contains("h()")
+        };
+        assert!(has_h, "init {shell} missing h function");
     }
 }
 
@@ -40,7 +45,7 @@ fn init_shell_flag_works() {
     let out = bin().args(["init", "--shell", "fish"]).output().unwrap();
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("alias h=hop"));
+    assert!(s.contains("function h"));
 }
 
 #[test]
