@@ -83,7 +83,9 @@ fn run_loop<W: Write>(
 ) -> io::Result<Option<String>> {
     let mut query = initial_query.to_string();
     let mut cursor_idx: usize = 0;
-    let mut items = compute_items(db, &query);
+    let (initial_items, last_computed_query) = compute_items(db, &query, None);
+    let mut items = initial_items;
+    let mut last_computed_query = last_computed_query;
     let preview = should_show_preview();
 
     // Filter mode: when true, typing goes to an explicit filter input at bottom
@@ -110,7 +112,9 @@ fn run_loop<W: Write>(
                     query = filter_buf.clone();
                     filter_buf.clear();
                     filter_mode = false;
-                    items = compute_items(db, &query);
+                    let (new_items, new_last) = compute_items(db, &query, Some(&last_computed_query));
+                    items = new_items;
+                    last_computed_query = new_last;
                     cursor_idx = 0;
                 }
                 KeyCode::Esc => {
@@ -148,17 +152,23 @@ fn run_loop<W: Write>(
                 }
                 (KeyCode::Backspace, _) if !query.is_empty() => {
                     query.pop();
-                    items = compute_items(db, &query);
+                    let (new_items, new_last) = compute_items(db, &query, Some(&last_computed_query));
+                    items = new_items;
+                    last_computed_query = new_last;
                     cursor_idx = 0;
                 }
                 (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                     query.clear();
-                    items = compute_items(db, &query);
+                    let (new_items, new_last) = compute_items(db, &query, Some(&last_computed_query));
+                    items = new_items;
+                    last_computed_query = new_last;
                     cursor_idx = 0;
                 }
                 (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
                     query.push(c);
-                    items = compute_items(db, &query);
+                    let (new_items, new_last) = compute_items(db, &query, Some(&last_computed_query));
+                    items = new_items;
+                    last_computed_query = new_last;
                     cursor_idx = 0;
                 }
                 _ => {}
@@ -184,7 +194,13 @@ fn run_loop<W: Write>(
     }
 }
 
-fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
+fn compute_items(db: &Database, query: &str, last_query: Option<&str>) -> (Vec<PickerItem>, String) {
+    if let Some(last) = last_query {
+        if query == last {
+            return (vec![], last.to_string());
+        }
+    }
+
     let scorer = Scorer::new(now_secs());
     let mut candidates: Vec<Scored> = Vec::new();
     let limit = visible_rows().max(4) * 2;
@@ -224,7 +240,7 @@ fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
 
     candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
     candidates.dedup_by(|a, b| a.path == b.path);
-    candidates
+    let items: Vec<PickerItem> = candidates
         .into_iter()
         .take(vr.max(4))
         .map(|c| PickerItem {
@@ -232,7 +248,8 @@ fn compute_items(db: &Database, query: &str) -> Vec<PickerItem> {
             source: c.source,
             matched_indices: c.matched_indices,
         })
-        .collect()
+        .collect();
+    (items, query.to_string())
 }
 
 /// Returns the picker subprocess timeout from HOP_PICKER_TIMEOUT env var, default 5s.
@@ -421,7 +438,7 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         db.record_visit(&target.to_string_lossy()).unwrap();
 
-        let items = compute_items(&db, "");
+        let (items, _) = compute_items(&db, "", None);
         assert!(!items.is_empty(), "empty query should return recent items");
         assert_eq!(items[0].source, Source::History);
     }
@@ -438,7 +455,7 @@ mod tests {
         db.record_visit(&dead.to_string_lossy()).unwrap();
         std::fs::remove_dir(&dead).unwrap();
 
-        let items = compute_items(&db, "dead");
+        let (items, _) = compute_items(&db, "dead", None);
         let paths: Vec<_> = items.iter().map(|i| i.path.clone()).collect();
         assert!(
             !paths.iter().any(|p| p.contains("dead")),
@@ -455,7 +472,7 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         db.record_visit(&target.to_string_lossy()).unwrap();
 
-        let items = compute_items(&db, "proj");
+        let (items, _) = compute_items(&db, "proj", None);
         assert!(!items.is_empty(), "query 'proj' should match 'my-project'");
     }
 
@@ -469,7 +486,7 @@ mod tests {
         db.record_visit(&target.to_string_lossy()).unwrap();
         db.record_visit(&target.to_string_lossy()).unwrap();
 
-        let items = compute_items(&db, "dup");
+        let (items, _) = compute_items(&db, "dup", None);
         let paths: Vec<_> = items.iter().map(|i| i.path.clone()).collect();
         assert_eq!(
             paths.len(),
@@ -484,7 +501,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_at(&tmp.path().join("hop.db")).unwrap();
         // No entries recorded — should not panic
-        let items = compute_items(&db, "");
+        let (items, _) = compute_items(&db, "", None);
         assert!(items.is_empty(), "empty DB should yield no items");
     }
 

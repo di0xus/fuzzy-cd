@@ -1,6 +1,4 @@
 use std::path::Path;
-use std::sync::mpsc;
-use std::time::Duration;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -345,30 +343,18 @@ pub fn classify_query(query: &str) -> (&str, bool, bool) {
 }
 
 /// Returns true if the path matches the given pattern.
-/// For regex patterns, uses a pre-compiled regex with timeout protection;
-/// otherwise uses case-insensitive substring match.
+/// Regex matching uses the `regex` crate directly (linear-time NFA, no ReDoS risk).
+/// Falls back to case-insensitive substring match on timeout or for non-regex patterns.
 fn path_matches_with_regex(path: &str, regex: Option<&Regex>, pattern: &str) -> bool {
+    let path_lower = path.to_lowercase();
     if let Some(re) = regex {
-        // Use a thread with timeout to protect against malicious regex (ReDoS)
-        let (tx, rx) = mpsc::channel();
-        let re_clone = re.clone();
-        let path_lower = path.to_lowercase();
-        let path_for_thread = path_lower.clone();
-        std::thread::spawn(move || {
-            let result = re_clone.is_match(&path_for_thread);
-            let _ = tx.send(result);
-        });
-        let timeout = Duration::from_millis(100);
-        let matched = rx.recv_timeout(timeout).ok().unwrap_or(false);
-
-        if matched {
+        if re.is_match(&path_lower) {
             return true;
         }
-        // Timeout: fall back to substring matching
-        path_lower.contains(&pattern.to_lowercase())
-    } else {
-        path.to_lowercase().contains(&pattern.to_lowercase())
+        // Fall back to substring match
+        return path_lower.contains(&pattern.to_lowercase());
     }
+    path_lower.contains(&pattern.to_lowercase())
 }
 
 /// Pre-filter candidates based on regex or negation query modifiers.
@@ -451,45 +437,13 @@ pub fn score_history_batch(
     let scored: Vec<Scored> = if is_regex || is_negation {
         filtered
             .iter()
-            .find_map(|row| {
-                scorer
-                    .score_history_boosted(row, effective, Some(&effective_lower))
-                    .and_then(|scored| {
-                        if scored.score >= 20000 {
-                            Some(vec![scored])
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .unwrap_or_else(|| {
-                filtered
-                    .iter()
-                    .filter_map(|row| {
-                        scorer.score_history_boosted(row, effective, Some(&effective_lower))
-                    })
-                    .collect()
-            })
+            .filter_map(|row| scorer.score_history_boosted(row, effective, Some(&effective_lower)))
+            .collect()
     } else {
         filtered
             .iter()
-            .find_map(|row| {
-                scorer
-                    .score_history(row, match_query, Some(&query_lower))
-                    .and_then(|scored| {
-                        if scored.score >= 20000 {
-                            Some(vec![scored])
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .unwrap_or_else(|| {
-                filtered
-                    .iter()
-                    .filter_map(|row| scorer.score_history(row, match_query, Some(&query_lower)))
-                    .collect()
-            })
+            .filter_map(|row| scorer.score_history(row, match_query, Some(&query_lower)))
+            .collect()
     };
     let filter_applied = is_regex || is_negation;
     (scored, filter_applied)

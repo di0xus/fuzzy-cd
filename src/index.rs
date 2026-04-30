@@ -11,15 +11,6 @@ const BATCH_SIZE: usize = 500;
 pub struct IndexStats {
     pub scanned: usize,
     pub inserted: usize,
-    #[allow(dead_code)]
-    batch: Option<Vec<String>>,
-}
-
-impl IndexStats {
-    #[allow(dead_code)]
-    fn flush_batch(&mut self, _db: &Database) {
-        // No-op: batch inserts are now done directly via rayon parallelization
-    }
 }
 
 pub fn reindex(db: &Database, cfg: &Config) -> IndexStats {
@@ -43,7 +34,6 @@ pub fn reindex(db: &Database, cfg: &Config) -> IndexStats {
     IndexStats {
         scanned: paths.len(),
         inserted: paths.len(),
-        batch: None,
     }
 }
 

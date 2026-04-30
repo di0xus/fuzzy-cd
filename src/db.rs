@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::score::basename_lower;
 
 use directories::ProjectDirs;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 
 pub const APP_NAME: &str = "hop";
 pub const DB_NAME: &str = "hop.db";
@@ -342,29 +342,59 @@ impl Database {
         let ninety_days = 90.0 * 86_400.0;
         let cutoff = now - ninety_days;
 
-        let rows = self.history_rows()?;
-        let to_remove: Vec<String> = rows
-            .into_iter()
-            .filter(|r| {
-                // Skip dirs from config
-                if let Some(name) = Path::new(&r.path).file_name() {
-                    let name_str = name.to_string_lossy();
-                    if skip_dirs.iter().any(|d| d == name_str.as_ref()) {
-                        return false;
-                    }
-                }
-                // Remove if visits=1 AND old, OR if path no longer exists
-                (r.visits == 1 && r.last_visited < cutoff) || !Path::new(&r.path).is_dir()
-            })
-            .map(|r| r.path)
+        // Load single-visit+old entries for age-based pruning
+        let mut stmt1 = self.conn.prepare(
+            "SELECT rowid, path FROM history WHERE visits = 1 AND last_visited < ?1",
+        )?;
+        let old_single: Vec<(i64, String)> = stmt1
+            .query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
             .collect();
+        drop(stmt1);
+
+        // Load all rows for stale-path check (deleted directories)
+        let mut stmt2 = self.conn.prepare("SELECT rowid, path FROM history")?;
+        let stale: Vec<(i64, String)> = stmt2
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt2);
+
+        let mut to_remove: Vec<i64> = Vec::new();
+
+        // Age-based: single visit, old, not in skip_dirs
+        for (rowid, path) in old_single {
+            if let Some(name) = Path::new(&path).file_name() {
+                let name_str = name.to_string_lossy();
+                if skip_dirs.iter().any(|d| d == name_str.as_ref()) {
+                    continue;
+                }
+            }
+            to_remove.push(rowid);
+        }
+
+        // Stale: path no longer exists
+        for (rowid, path) in stale {
+            if !Path::new(&path).is_dir() {
+                to_remove.push(rowid);
+            }
+        }
+
+        if to_remove.is_empty() {
+            return Ok(0);
+        }
+
+        to_remove.sort_unstable();
+        to_remove.dedup();
 
         let mut removed = 0;
-        for p in &to_remove {
-            // Delete directly so canonicalized paths match (forget does raw string match).
-            removed += self
-                .conn
-                .execute("DELETE FROM history WHERE path = ?1", params![p])?;
+        for chunk in to_remove.chunks(100) {
+            let placeholders: Vec<String> = chunk.iter().map(|_| "?".to_string()).collect();
+            let sql = format!(
+                "DELETE FROM history WHERE rowid IN ({})",
+                placeholders.join(",")
+            );
+            removed += self.conn.execute(&sql, params_from_iter(chunk))?;
         }
         Ok(removed)
     }
@@ -468,11 +498,7 @@ impl Database {
     }
 
     pub fn upsert_indexed_dir(&self, path: &str) -> rusqlite::Result<()> {
-        let basename = basename_lower(path);
-        let parent = Path::new(path)
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let (basename, parent) = Self::indexed_dir_params(path);
         self.conn.execute(
             "INSERT INTO dir_index(path, basename, parent, indexed_at)
              VALUES(?1, ?2, ?3, ?4)
@@ -482,14 +508,21 @@ impl Database {
         Ok(())
     }
 
+    /// Extract (basename, parent) for dir_index. Both upsert methods share this logic.
+    fn indexed_dir_params(path: &str) -> (String, String) {
+        let basename = basename_lower(path);
+        let parent = Path::new(path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        (basename, parent)
+    }
+
     pub fn batch_upsert_indexed_dirs(&self, paths: &[String]) -> rusqlite::Result<()> {
         let now = now_secs();
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
         for path in paths {
-            let basename = basename_lower(path);
-            let parent = Path::new(path)
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let (basename, parent) = Self::indexed_dir_params(path);
             self.conn.execute(
                 "INSERT INTO dir_index(path, basename, parent, indexed_at)
                  VALUES(?1, ?2, ?3, ?4)
@@ -497,6 +530,7 @@ impl Database {
                 params![path, basename, parent, now],
             )?;
         }
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
