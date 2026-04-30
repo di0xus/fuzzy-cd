@@ -35,30 +35,22 @@ fn fish_script() -> String {
         .map(|(major, minor)| major > 2 || (major == 2 && minor >= 9))
         .unwrap_or(false);
 
+    let script = r#"# hop fish integration
+function __hop_chpwd --on-variable PWD
+    command hop add -- "$PWD" >/dev/null 2>&1
+end
+
+functions -e h 2>/dev/null; function h
+    set -l dir (command hop $argv)
+    [ -n "$dir" ] && cd -- "$dir"
+end
+"#;
     if use_abbr {
-        r#"# hop fish integration
-function __hop_chpwd --on-variable PWD
-    command hop add -- "$PWD" >/dev/null 2>&1
-end
+        format!(r#"abbr --add h=hop
 
-functions -e h 2>/dev/null; function h
-    set -l dir (command hop $argv)
-    [ -n "$dir" ] && cd -- "$dir"
-end
-"#
-        .to_string()
+{script}"#)
     } else {
-        r#"# hop fish integration
-function __hop_chpwd --on-variable PWD
-    command hop add -- "$PWD" >/dev/null 2>&1
-end
-
-functions -e h 2>/dev/null; function h
-    set -l dir (command hop $argv)
-    [ -n "$dir" ] && cd -- "$dir"
-end
-"#
-        .to_string()
+        script.to_string()
     }
 }
 
