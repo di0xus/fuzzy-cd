@@ -1,26 +1,53 @@
+use rayon::prelude::*;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::db::Database;
 
+const BATCH_SIZE: usize = 500;
+
+#[derive(Default)]
 pub struct IndexStats {
     pub scanned: usize,
     pub inserted: usize,
+    #[allow(dead_code)]
+    batch: Option<Vec<String>>,
+}
+
+impl IndexStats {
+    #[allow(dead_code)]
+    fn flush_batch(&mut self, _db: &Database) {
+        // No-op: batch inserts are now done directly via rayon parallelization
+    }
 }
 
 pub fn reindex(db: &Database, cfg: &Config) -> IndexStats {
-    let mut stats = IndexStats {
-        scanned: 0,
-        inserted: 0,
-    };
+    // Collect all directories first
+    let mut all_dirs = Vec::new();
     for root in &cfg.index_roots {
-        walk(db, root, cfg, 0, &mut stats);
+        walk_collect(root, cfg, 0, &mut all_dirs);
     }
-    stats
+
+    // Parallel conversion to strings using rayon
+    let paths: Vec<String> = all_dirs
+        .par_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+
+    // Sequential batch insert
+    for chunk in paths.chunks(BATCH_SIZE) {
+        db.batch_upsert_indexed_dirs(chunk).ok();
+    }
+
+    IndexStats {
+        scanned: paths.len(),
+        inserted: paths.len(),
+        batch: None,
+    }
 }
 
-fn walk(db: &Database, dir: &Path, cfg: &Config, depth: usize, stats: &mut IndexStats) {
+fn walk_collect(dir: &Path, cfg: &Config, depth: usize, dirs: &mut Vec<PathBuf>) {
     if depth > cfg.max_depth {
         return;
     }
@@ -30,8 +57,9 @@ fn walk(db: &Database, dir: &Path, cfg: &Config, depth: usize, stats: &mut Index
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
+        let name = match path.file_name().map(|n| n.to_string_lossy().into_owned()) {
+            Some(n) => n,
+            None => continue,
         };
         let ft = match entry.file_type() {
             Ok(f) => f,
@@ -43,11 +71,8 @@ fn walk(db: &Database, dir: &Path, cfg: &Config, depth: usize, stats: &mut Index
         if cfg.should_skip(&name) {
             continue;
         }
-        stats.scanned += 1;
-        if db.upsert_indexed_dir(&path.to_string_lossy()).is_ok() {
-            stats.inserted += 1;
-        }
-        walk(db, &path, cfg, depth + 1, stats);
+        dirs.push(path.clone());
+        walk_collect(&path, cfg, depth + 1, dirs);
     }
 }
 

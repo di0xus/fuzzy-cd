@@ -104,7 +104,12 @@ impl Config {
 
         let content = match std::fs::read_to_string(path) {
             Ok(s) => s,
-            Err(_e) => {
+            Err(e) => {
+                eprintln!(
+                    "hop: warning: could not read config file '{}': {}",
+                    path.display(),
+                    e
+                );
                 return Config::default();
             }
         };
@@ -282,5 +287,29 @@ mod tests {
             warnings.unknown_keys.iter().any(|k| k == "unknown_key"),
             "should warn about unknown key"
         );
+    }
+
+    #[test]
+    fn missing_config_uses_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nonexistent.toml");
+        // Don't create the file
+        let mut warnings = ParseWarnings::default();
+        let c = Config::load_from_with_warnings(&path, &mut warnings);
+        // Should fall back to defaults
+        assert_eq!(c.max_depth, 6);
+        assert!(!c.skip_dirs.is_empty());
+    }
+
+    #[test]
+    fn malformed_toml_handled_gracefully() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad.toml");
+        // TOML parse error: missing closing bracket, invalid syntax
+        std::fs::write(&path, "max_depth = [[[\n").unwrap();
+        let mut warnings = ParseWarnings::default();
+        let c = Config::load_from_with_warnings(&path, &mut warnings);
+        // Should fall back to defaults (parser skips bad lines)
+        assert_eq!(c.max_depth, 6);
     }
 }

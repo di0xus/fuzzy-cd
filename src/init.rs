@@ -46,9 +46,11 @@ functions -e h 2>/dev/null; function h
 end
 "#;
     if use_abbr {
-        format!(r#"abbr --add h=hop
+        format!(
+            r#"abbr --add h=hop
 
-{script}"#)
+{script}"#
+        )
     } else {
         script.to_string()
     }

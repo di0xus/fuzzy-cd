@@ -127,6 +127,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 return ExitCode::from(2);
             };
 
+            if raw_arg.is_empty() {
+                eprintln!("empty path; did you mean to run `hop` without arguments?");
+                return ExitCode::from(1);
+            }
+
             let path = expand_home(raw_arg);
             if !path.is_dir() {
                 eprintln!("not a directory: {}", path.display());
@@ -818,8 +823,13 @@ fn print_rows(rows: &[HistoryRow]) {
 // v0.8: score, list, export, update
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCode {
-    let scorer = Scorer::new(now_secs());
+/// Collect score breakdowns from bookmarks, history, and index fallback.
+fn collect_breakdowns(
+    db: &Database,
+    cfg: &Config,
+    query: &str,
+    scorer: &Scorer,
+) -> Vec<ScoreBreakdown> {
     let mut breakdowns: Vec<ScoreBreakdown> = Vec::new();
 
     // exact bookmark first
@@ -844,7 +854,7 @@ fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCod
 
     // score history with regex/negation support
     if let Ok(rows) = db.history_rows() {
-        let more = crate::score::score_history_breakdown_batch(&scorer, &rows, query);
+        let more = crate::score::score_history_breakdown_batch(scorer, &rows, query);
         for b in more {
             if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
                 breakdowns.push(b);
@@ -868,6 +878,12 @@ fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCod
 
     breakdowns.sort_by_key(|b| std::cmp::Reverse(b.total));
     breakdowns.dedup_by(|a, b| a.path == b.path);
+    breakdowns
+}
+
+fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCode {
+    let scorer = Scorer::new(now_secs());
+    let breakdowns = collect_breakdowns(db, cfg, query, &scorer);
 
     if breakdowns.is_empty() {
         return ExitCode::from(1);
@@ -1015,54 +1031,7 @@ fn cmd_export(db: &Database, format: &str) -> ExitCode {
 
 fn cmd_explain(db: &Database, cfg: &Config, query: &str) -> ExitCode {
     let scorer = Scorer::new(now_secs());
-    let mut breakdowns: Vec<ScoreBreakdown> = Vec::new();
-
-    // exact bookmark first
-    if let Ok(Some(p)) = db.bookmark_exact(query) {
-        if Path::new(&p).is_dir() {
-            if let Some(b) = scorer.score_bookmark_breakdown(query, &p, query) {
-                breakdowns.push(b);
-            }
-        }
-    }
-
-    // score bookmarks
-    if let Ok(bms) = db.bookmarks() {
-        for (alias, path) in bms {
-            if let Some(b) = scorer.score_bookmark_breakdown(&alias, &path, query) {
-                if Path::new(&b.path).is_dir() && b.total > cfg.min_score {
-                    breakdowns.push(b);
-                }
-            }
-        }
-    }
-
-    // score history with regex/negation support
-    if let Ok(rows) = db.history_rows() {
-        let more = crate::score::score_history_breakdown_batch(&scorer, &rows, query);
-        for b in more {
-            if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
-                breakdowns.push(b);
-            }
-        }
-    }
-
-    // fallback index only if best is weak
-    let best_history = breakdowns.iter().map(|b| b.total).max().unwrap_or(0);
-    if best_history < cfg.min_score * 2 {
-        if let Ok(paths) = db.index_rows() {
-            for p in paths {
-                if let Some(b) = scorer.score_indexed_breakdown(&p, query) {
-                    if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
-                        breakdowns.push(b);
-                    }
-                }
-            }
-        }
-    }
-
-    breakdowns.sort_by_key(|b| std::cmp::Reverse(b.total));
-    breakdowns.dedup_by(|a, b| a.path == b.path);
+    let breakdowns = collect_breakdowns(db, cfg, query, &scorer);
 
     if breakdowns.is_empty() {
         return ExitCode::from(1);
