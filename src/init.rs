@@ -41,7 +41,10 @@ function __hop_chpwd --on-variable PWD
     command hop add -- "$PWD" >/dev/null 2>&1
 end
 
-abbr --add h=hop
+functions -e h 2>/dev/null; function h
+    set -l dir (command hop $argv)
+    [ -n "$dir" ] && cd -- "$dir"
+end
 "#
         .to_string()
     } else {
@@ -50,7 +53,10 @@ function __hop_chpwd --on-variable PWD
     command hop add -- "$PWD" >/dev/null 2>&1
 end
 
-alias h=hop
+functions -e h 2>/dev/null; function h
+    set -l dir (command hop $argv)
+    [ -n "$dir" ] && cd -- "$dir"
+end
 "#
         .to_string()
     }
@@ -115,7 +121,13 @@ case ":${PROMPT_COMMAND:-}:" in
   *) PROMPT_COMMAND="__hop_chpwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
 esac
 
-alias h=hop
+unalias h 2>/dev/null || true
+
+h() {
+    local dir
+    dir=$(command hop "$@")
+    [[ -n "$dir" ]] && builtin cd -- "$dir"
+}
 "#;
 
 const ZSH: &str = r#"# hop zsh integration
@@ -123,7 +135,13 @@ autoload -U add-zsh-hook
 __hop_chpwd() { command hop add -- "$PWD" >/dev/null 2>&1 }
 add-zsh-hook chpwd __hop_chpwd
 
-alias h=hop
+unalias h 2>/dev/null || true
+
+h() {
+    local dir
+    dir=$(command hop "$@")
+    [[ -n "$dir" ]] && builtin cd -- "$dir"
+}
 "#;
 
 #[cfg(test)]
@@ -143,7 +161,13 @@ mod tests {
         for shell in ["bash", "zsh", "fish"] {
             let s = script_for(shell).unwrap();
             assert!(s.contains("command hop"), "{shell} missing binary call");
-            assert!(s.contains("alias h=hop"), "{shell} missing h alias");
+            // zsh/bash use h(), fish uses "function h"
+            let has_h = if shell == "fish" {
+                s.contains("function h")
+            } else {
+                s.contains("h()")
+            };
+            assert!(has_h, "{shell} missing h function definition");
             assert!(!s.contains("fuzzy-cd"), "{shell} still references old name");
         }
     }
