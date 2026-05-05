@@ -36,7 +36,7 @@ fn init_emits_scripts() {
 
 #[test]
 fn init_rejects_unknown_shell() {
-    let out = bin().arg("init").arg("nushell").output().unwrap();
+    let out = bin().arg("init").arg("unknownshell").output().unwrap();
     assert!(!out.status.success());
 }
 
@@ -59,7 +59,7 @@ fn init_verify_runs() {
 
 #[test]
 fn completions_emits_scripts() {
-    for shell in ["bash", "zsh", "fish"] {
+    for shell in ["bash", "zsh", "fish", "nushell", "elvish"] {
         let out = bin().args(["completions", shell]).output().unwrap();
         assert!(out.status.success(), "completions {shell} failed");
         let s = String::from_utf8_lossy(&out.stdout);
@@ -69,7 +69,7 @@ fn completions_emits_scripts() {
 
 #[test]
 fn completions_rejects_unknown_shell() {
-    let out = bin().args(["completions", "nushell"]).output().unwrap();
+    let out = bin().args(["completions", "unknownshell"]).output().unwrap();
     assert!(!out.status.success());
 }
 
