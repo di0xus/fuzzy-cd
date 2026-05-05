@@ -1,3 +1,5 @@
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -49,6 +51,11 @@ pub fn migrate_legacy_data_dir() {
     }
     if let Some(parent) = new_db.parent() {
         let _ = std::fs::create_dir_all(parent);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     let _ = std::fs::copy(&legacy_db, &new_db);
     // Best-effort copy of WAL/SHM siblings so we don't lose uncommitted rows.
@@ -102,6 +109,8 @@ impl Database {
     pub fn open_at(path: &Path) -> rusqlite::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
+            #[cfg(unix)]
+            std::fs::set_permissions(parent, PermissionsExt::from_mode(0o700)).ok();
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -209,6 +218,11 @@ impl Database {
                 "CREATE INDEX IF NOT EXISTS idx_history_basename ON history(basename)",
                 [],
             )?;
+            // Index parent column for efficient child-lookup queries.
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dir_index_parent ON dir_index(parent)",
+                [],
+            )?;
         }
 
         self.conn.execute(
@@ -258,60 +272,51 @@ impl Database {
     where
         F: Fn(usize, usize),
     {
-        // History stale - stream in batches to avoid loading all paths into memory
-        let total: usize = self
+        // History stale — parallel is_dir() check across all paths, then sequential removal.
+        let history_paths: Vec<String> = self
             .conn
-            .query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))?;
-        let mut stmt = self.conn.prepare("SELECT path FROM history")?;
-        let mut rows = stmt.query([])?;
-        let mut batch = Vec::with_capacity(batch_size);
-        let mut removed = 0;
-        while let Some(row) = rows.next()? {
-            let p: String = row.get(0)?;
-            batch.push(p);
-            if batch.len() == batch_size {
-                for p in batch.drain(..) {
-                    if !Path::new(&p).is_dir() {
-                        removed += self.forget(&p)?;
-                    }
-                }
-                progress(batch.len(), total);
-            }
-        }
-        for p in batch.drain(..) {
-            if !Path::new(&p).is_dir() {
-                removed += self.forget(&p)?;
-            }
-        }
-        progress(removed, total);
+            .prepare("SELECT path FROM history")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .flatten()
+            .collect();
 
-        // Index stale - stream in batches to avoid loading all paths into memory
-        let total_idx: usize = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM dir_index", [], |r| r.get(0))?;
-        let mut stmt = self.conn.prepare("SELECT path FROM dir_index")?;
-        let mut rows = stmt.query([])?;
-        let mut batch = Vec::with_capacity(batch_size);
-        while let Some(row) = rows.next()? {
-            let p: String = row.get(0)?;
-            batch.push(p);
-            if batch.len() == batch_size {
-                for p in batch.drain(..) {
-                    if !Path::new(&p).is_dir() {
-                        self.conn
-                            .execute("DELETE FROM dir_index WHERE path = ?1", params![p])?;
-                    }
-                }
-                progress(batch.len(), total_idx);
+        let stale_history: Vec<String> = history_paths
+            .par_iter()
+            .filter(|p| !Path::new(p).is_dir())
+            .cloned()
+            .collect();
+
+        let mut removed = 0;
+        for chunk in stale_history.chunks(batch_size) {
+            for p in chunk {
+                removed += self.forget(p)?;
             }
+            progress(chunk.len(), stale_history.len());
         }
-        for p in batch.drain(..) {
-            if !Path::new(&p).is_dir() {
+        progress(removed, stale_history.len());
+
+        // Index stale — parallel is_dir() check, then sequential removal.
+        let index_paths: Vec<String> = self
+            .conn
+            .prepare("SELECT path FROM dir_index")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .flatten()
+            .collect();
+
+        let stale_index: Vec<String> = index_paths
+            .par_iter()
+            .filter(|p| !Path::new(p).is_dir())
+            .cloned()
+            .collect();
+
+        for chunk in stale_index.chunks(batch_size) {
+            for p in chunk {
                 self.conn
                     .execute("DELETE FROM dir_index WHERE path = ?1", params![p])?;
             }
+            progress(chunk.len(), stale_index.len());
         }
-        progress(batch.len(), total_idx);
+        progress(stale_index.len(), stale_index.len());
         Ok(removed)
     }
 
@@ -343,9 +348,9 @@ impl Database {
         let cutoff = now - ninety_days;
 
         // Load single-visit+old entries for age-based pruning
-        let mut stmt1 = self.conn.prepare(
-            "SELECT rowid, path FROM history WHERE visits = 1 AND last_visited < ?1",
-        )?;
+        let mut stmt1 = self
+            .conn
+            .prepare("SELECT rowid, path FROM history WHERE visits = 1 AND last_visited < ?1")?;
         let old_single: Vec<(i64, String)> = stmt1
             .query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
             .filter_map(|r| r.ok())
@@ -544,35 +549,38 @@ impl Database {
     }
 
     pub fn counts(&self) -> rusqlite::Result<DbCounts> {
-        let total = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM history", [], |r| r.get::<_, i64>(0))?;
-        let total_visits =
-            self.conn
-                .query_row("SELECT COALESCE(SUM(visits), 0) FROM history", [], |r| {
-                    r.get::<_, i64>(0)
-                })?;
-        let bookmarks = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM bookmarks", [], |r| r.get::<_, i64>(0))?;
-        let indexed = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM dir_index", [], |r| r.get::<_, i64>(0))?;
-        let top_path: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT path FROM history ORDER BY visits DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(DbCounts {
-            total,
-            total_visits,
-            bookmarks,
-            indexed,
-            top_path,
-        })
+        self.conn.query_row(
+            r#"
+            WITH
+                hist_total  AS (SELECT COUNT(*)          AS n FROM history),
+                hist_visits AS (SELECT COALESCE(SUM(visits), 0) AS n FROM history),
+                bm_total    AS (SELECT COUNT(*)          AS n FROM bookmarks),
+                idx_total   AS (SELECT COUNT(*)          AS n FROM dir_index),
+                top_row     AS (
+                    SELECT path FROM history
+                    WHERE 1 = (SELECT COUNT(*) FROM history WHERE visits > history.visits)
+                    UNION ALL
+                    SELECT path FROM history WHERE 0 = (SELECT COUNT(*) FROM history)
+                    LIMIT 1
+                )
+            SELECT
+                (SELECT n FROM hist_total)  AS total,
+                (SELECT n FROM hist_visits) AS total_visits,
+                (SELECT n FROM bm_total)    AS bookmarks,
+                (SELECT n FROM idx_total)   AS indexed,
+                (SELECT path FROM top_row)  AS top_path
+            "#,
+            [],
+            |r| {
+                Ok(DbCounts {
+                    total: r.get(0)?,
+                    total_visits: r.get(1)?,
+                    bookmarks: r.get(2)?,
+                    indexed: r.get(3)?,
+                    top_path: r.get(4)?,
+                })
+            },
+        )
     }
 
     /// Returns the schema version stored in the meta table, or 0 if not set.

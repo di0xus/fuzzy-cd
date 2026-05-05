@@ -168,15 +168,16 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("remove failed: {}", e);
-                    0
+                    return ExitCode::from(1);
                 }
             };
             if removed > 0 {
                 println!("removed: {}", path.display());
+                ExitCode::SUCCESS
             } else {
                 println!("not found in history: {}", path.display());
+                ExitCode::from(1)
             }
-            ExitCode::SUCCESS
         }
         "forget" | "zap" => {
             let dry_run = args[2..].iter().any(|a| a == "--dry-run");
@@ -216,7 +217,10 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 }
             }
         }
-        "book" | "bookmark" => cmd_bookmark(&db, &args[2..]),
+        "book" | "bookmark" => {
+            let book_json = args[2..].iter().any(|a| a == "--json" || a == "-j");
+            cmd_bookmark(&db, &args[2..], book_json)
+        }
         "history" => {
             let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
             let rows = match db.top(n) {
@@ -444,12 +448,22 @@ pub fn run(args: Vec<String>) -> ExitCode {
             cmd_stats(&db, verbose)
         }
         "reindex" | "--reindex" | "-r" => {
-            let stats = index::reindex(&db, &cfg);
-            println!(
-                "indexed {} dirs ({} scanned)",
-                stats.inserted, stats.scanned
-            );
-            ExitCode::SUCCESS
+            let dry_run = args[2..].iter().any(|a| a == "--dry-run");
+            match index::reindex(&db, &cfg, dry_run) {
+                Ok(stats) => {
+                    println!(
+                        "indexed {} dirs ({} scanned){}",
+                        stats.inserted,
+                        stats.scanned,
+                        if dry_run { " [dry-run]" } else { "" }
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("reindex failed: {}", e);
+                    ExitCode::from(1)
+                }
+            }
         }
         "doctor" => {
             let r = doctor::run(&db);
@@ -584,12 +598,22 @@ fn cmd_completions(args: &[String]) -> ExitCode {
     }
 }
 
-fn cmd_bookmark(db: &Database, args: &[String]) -> ExitCode {
+fn cmd_bookmark(db: &Database, args: &[String], is_json: bool) -> ExitCode {
     if args.is_empty() || args[0] == "list" {
+        let list_arg = args.first().map(String::as_str);
+        let is_list_json = list_arg == Some("--json") || list_arg == Some("-j");
         match db.bookmarks() {
             Ok(bms) => {
-                for (alias, path) in bms {
-                    println!("{:20}  {}", alias, path);
+                if is_json || is_list_json {
+                    let items: Vec<_> = bms
+                        .iter()
+                        .map(|(alias, path)| serde_json::json!({ "alias": alias, "path": path }))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&items).unwrap());
+                } else {
+                    for (alias, path) in bms {
+                        println!("{:20}  {}", alias, path);
+                    }
                 }
                 ExitCode::SUCCESS
             }
@@ -600,7 +624,17 @@ fn cmd_bookmark(db: &Database, args: &[String]) -> ExitCode {
             eprintln!("Usage: hop book rm <alias>");
             return ExitCode::from(2);
         }
-        let _ = db.remove_bookmark(&args[1]);
+        let removed = match db.remove_bookmark(&args[1]) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("remove_bookmark failed: {}", e);
+                return ExitCode::from(1);
+            }
+        };
+        if removed == 0 {
+            eprintln!("no such bookmark: {}", args[1]);
+            return ExitCode::from(1);
+        }
         ExitCode::SUCCESS
     } else {
         let alias = &args[0];

@@ -290,9 +290,11 @@ complete -c hop -n '__hop_using_command import' -l dry-run -d 'preview import wi
 
 # book subcommand
 complete -c hop -n '__hop_using_command book'     -a 'list rm' -d 'bookmark action'
-complete -c hop -n '__hop_using_command book'     -a '(__hop_bookmark_aliases)'
+complete -c hop -n '__hop_using_command book'     -l json -s j -d 'output JSON'
+complete -c hop -n '__hop_using_command book rm'  -a '(__hop_bookmark_aliases)'
 complete -c hop -n '__hop_using_command bookmark' -a 'list rm' -d 'bookmark action'
-complete -c hop -n '__hop_using_command bookmark' -a '(__hop_bookmark_aliases)'
+complete -c hop -n '__hop_using_command bookmark' -l json -s j -d 'output JSON'
+complete -c hop -n '__hop_using_command bookmark rm' -a '(__hop_bookmark_aliases)'
 
 # add with --dry-run
 complete -c hop -n '__hop_using_command add' -l dry-run -d 'preview what would be added'
@@ -306,7 +308,7 @@ complete -c hop -n '__hop_using_command score' -l json -d 'output JSON'
 
 # list with --json and --limit
 complete -c hop -n '__hop_using_command list' -l json   -d 'output JSON'
-complete -c hop -n '__hop_using_command list' -l limit  -d 'limit results'
+complete -c hop -n '__hop_using_command list' -l limit -s l -d 'limit results'
 
 # export with --format
 complete -c hop -n '__hop_using_command export' -l format -d 'specify format' -a 'json csv tsv'

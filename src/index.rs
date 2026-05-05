@@ -1,4 +1,5 @@
 use rayon::prelude::*;
+use rusqlite::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -13,28 +14,37 @@ pub struct IndexStats {
     pub inserted: usize,
 }
 
-pub fn reindex(db: &Database, cfg: &Config) -> IndexStats {
+pub fn reindex(db: &Database, cfg: &Config, dry_run: bool) -> Result<IndexStats, Error> {
     // Collect all directories first
     let mut all_dirs = Vec::new();
     for root in &cfg.index_roots {
         walk_collect(root, cfg, 0, &mut all_dirs);
     }
 
-    // Parallel conversion to strings using rayon
-    let paths: Vec<String> = all_dirs
-        .par_iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
+    let paths: Vec<String> = if dry_run {
+        // Dry-run: skip directories that would be upserted (no DB writes)
+        all_dirs
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    } else {
+        // Parallel conversion to strings using rayon, then sequential batch insert
+        let paths: Vec<String> = all_dirs
+            .par_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
 
-    // Sequential batch insert
-    for chunk in paths.chunks(BATCH_SIZE) {
-        db.batch_upsert_indexed_dirs(chunk).ok();
-    }
+        // Sequential batch insert
+        for chunk in paths.chunks(BATCH_SIZE) {
+            db.batch_upsert_indexed_dirs(chunk)?;
+        }
+        paths
+    };
 
-    IndexStats {
+    Ok(IndexStats {
         scanned: paths.len(),
         inserted: paths.len(),
-    }
+    })
 }
 
 fn walk_collect(dir: &Path, cfg: &Config, depth: usize, dirs: &mut Vec<PathBuf>) {
@@ -87,7 +97,7 @@ mod tests {
             min_score: 20,
             auto_prune_on_startup: false,
         };
-        let stats = reindex(&db, &cfg);
+        let stats = reindex(&db, &cfg, false).unwrap();
         assert_eq!(stats.scanned, 2, "should only scan a and a/b");
         assert_eq!(stats.inserted, 2);
         let rows = db.index_rows().unwrap();
