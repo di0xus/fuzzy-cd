@@ -1094,8 +1094,8 @@ fn cmd_explain(db: &Database, cfg: &Config, query: &str) -> ExitCode {
 }
 
 fn cmd_update(dry_run: bool) -> ExitCode {
-    // Fetch latest release info from GitHub API
-    let url = "https://api.github.com/repos/di0xus/hop/releases/latest";
+    // Fetch latest release info from Codeberg API
+    let url = "https://codeberg.org/api/v1/repos/dioxus/hop/releases/latest";
     let client = ureq::Agent::new();
     match client.get(url).call() {
         Ok(resp) => {
