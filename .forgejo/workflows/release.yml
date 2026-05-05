@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    name: build ${{ matrix.os }}-${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: hop-x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: hop-aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: hop-x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: hop-aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: install aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' > .cargo/config.toml
+
+      - name: build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: rename
+        run: cp target/${{ matrix.target }}/release/hop "${{ matrix.artifact }}"
+
+      - name: create release
+        env:
+          CODESIGN_TOKEN: ${{ secrets.CODESIGN_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Create release if it doesn't exist
+          RELEASE_ID=$(curl -s -X POST \
+            -H "Authorization: token $CODESIGN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"$TAG\",\"name\":\"$TAG\"}" \
+            "https://codeberg.org/api/v1/repos/dioxus/hop/releases" | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id','') or d.get('message',''))")
+          echo "release_id=$RELEASE_ID"
+          # Upload asset
+          curl -s -X POST \
+            -H "Authorization: token $CODESIGN_TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"${{ matrix.artifact }}" \
+            "https://codeberg.org/api/v1/repos/dioxus/hop/releases/$RELEASE_ID/assets?name=${{ matrix.artifact }}" | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print('uploaded:', d.get('name', d.get('message','')))"
