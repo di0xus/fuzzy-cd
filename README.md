@@ -19,7 +19,7 @@ Type a fragment of a directory name — `h work` — and hop jumps you to the be
 ### One-liner (recommended)
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://codeberg.org/dioxus/hop/raw/branch/main/install.sh | bash
 ```
 
 Downloads the latest binary for your platform, places it in `~/.local/bin`, and prints instructions if you need to add that to your `PATH`.
