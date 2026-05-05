@@ -8,6 +8,8 @@ pub fn script_for(shell: &str) -> Option<&'static str> {
         "bash" => Some(BASH),
         "zsh" => Some(ZSH),
         "fish" => Some(FISH),
+        "nushell" | "nu" => Some(NUSHELL),
+        "elvish" => Some(ELVISH),
         _ => None,
     }
 }
@@ -18,7 +20,7 @@ _hop() {
     _init_completion || return
 
     local subcommands="p pick add rm forget zap book bookmark history recent top score list export import prune clear stats reindex doctor explain update init completions help"
-    local shells="bash zsh fish"
+    local shells="bash zsh fish nushell nu elvish"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "$subcommands --help -h" -- "$cur") )
@@ -137,7 +139,7 @@ _hop() {
         'completions:emit completion script'
         'help:show help'
     )
-    shells=(bash zsh fish)
+    shells=(bash zsh fish nushell nu elvish)
 
     _arguments -C \
         '1: :->cmd' \
@@ -151,13 +153,13 @@ _hop() {
             case $words[1] in
                 init)
                     _arguments \
-                        '1:shell:_values "shell" bash zsh fish' \
+                        '1:shell:_values "shell" bash zsh fish nushell nu elvish' \
                         '--shell[specify shell explicitly]' \
                         '--verify[check shell integration]'
                     ;;
                 completions)
                     _arguments \
-                        '1:shell:_values "shell" bash zsh fish' \
+                        '1:shell:_values "shell" bash zsh fish nushell nu elvish' \
                         '--shell[specify shell explicitly]'
                     ;;
                 import)
@@ -278,10 +280,10 @@ complete -c hop -n __hop_needs_command -a help         -d 'show help'
 complete -c hop -n __hop_needs_command -l help         -d 'show help'
 
 # init / completions → shell with flags
-complete -c hop -n '__hop_using_command init'        -a 'bash zsh fish' -d 'shell name'
+complete -c hop -n '__hop_using_command init'        -a 'bash zsh fish nushell nu elvish' -d 'shell name'
 complete -c hop -n '__hop_using_command init'        -l shell          -d 'specify shell explicitly'
 complete -c hop -n '__hop_using_command init'        -l verify         -d 'check shell integration'
-complete -c hop -n '__hop_using_command completions' -a 'bash zsh fish' -d 'shell name'
+complete -c hop -n '__hop_using_command completions' -a 'bash zsh fish nushell nu elvish' -d 'shell name'
 complete -c hop -n '__hop_using_command completions' -l shell          -d 'specify shell explicitly'
 
 # import source with --dry-run
@@ -335,6 +337,34 @@ complete -c hop -n '__hop_using_command recent'   -a '10 20 50 100' -d 'limit co
 complete -c hop -n '__hop_using_command explain' -f -d 'query string'
 "#;
 
+const NUSHELL: &str = r#"# hop nushell completion
+# Save this to a file and use it with:
+#   use ~/some/path/hop_completions.nu
+
+export extern hop [
+    --help(-h)
+    --version(-v)
+    query:string
+]
+
+export alias h = hop
+
+# Subcommand completions via nushell's native mechanism
+# (nushell completions are typically registered at parse time)
+"#;
+
+const ELVISH: &str = r#"# hop elvish completion
+# Save this to ~/.local/share/hop/hop_completions.elv
+# and load it in your rc.elv: use ~/.local/share/hop/hop_completions.elv
+
+# Elvish completion for hop uses the built-in completion system.
+# A minimal stub that registers 'hop' as an external command:
+edit:completion:arg-completer[hop] = [@args] {
+    # Delegate to the hop binary's built-in bashcompctl fallback
+    ^hop --complete @args
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,12 +374,15 @@ mod tests {
         assert!(script_for("bash").is_some());
         assert!(script_for("zsh").is_some());
         assert!(script_for("fish").is_some());
-        assert!(script_for("nushell").is_none());
+        assert!(script_for("nushell").is_some());
+        assert!(script_for("nu").is_some());
+        assert!(script_for("elvish").is_some());
+        assert!(script_for("unknown-shell").is_none());
     }
 
     #[test]
     fn each_script_mentions_hop() {
-        for shell in ["bash", "zsh", "fish"] {
+        for shell in ["bash", "zsh", "fish", "nushell", "elvish"] {
             let s = script_for(shell).unwrap();
             assert!(
                 s.contains("hop"),

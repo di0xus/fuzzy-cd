@@ -229,7 +229,7 @@ fn compute_items(
         }
     } else {
         if let Ok(bms) = db.bookmarks() {
-            for (alias, path) in bms {
+            for (alias, path, _description) in bms {
                 if let Some(s) = scorer.score_bookmark(&alias, &path, query) {
                     candidates.push(s);
                 }

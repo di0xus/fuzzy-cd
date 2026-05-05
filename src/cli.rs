@@ -19,9 +19,10 @@ Usage:
     hop add <path>               Record a visit
     hop rm <path>                Remove from history (exact path)
     hop forget|zap <query>       Fuzzy-find and remove from history
-    hop book <alias> [path]      Set/resolve bookmark
-    hop book rm <alias>          Delete bookmark
-    hop book list                List bookmarks
+    hop book [alias] [path]      Set or resolve a bookmark
+    hop book list [--json]       List all bookmarks
+    hop book rm <alias>          Delete a bookmark
+    hop book edit <alias>        Edit alias, path, or description
     hop history [n]              Top n by visits (default 20)
     hop recent [n]               Last n visited (default 20)
     hop top                      Top 10.
@@ -36,10 +37,10 @@ Usage:
     hop reindex                  Rebuild filesystem index
     hop doctor                   Diagnose setup
     hop update [--dry-run]       Self-update to latest release
-    hop init <bash|zsh|fish>     Emit shell integration
-    hop init --shell <shell>     Same, with explicit flag
-    hop init --verify            Check shell integration
-    hop completions <bash|zsh|fish>  Emit tab-completion script
+    hop init <bash|zsh|fish|nushell|elvish>  Emit shell integration
+    hop init --shell <shell>                 Same, with explicit flag
+    hop init --verify                        Check shell integration
+    hop completions <bash|zsh|fish|nushell|elvish>  Emit tab-completion script
     hop --help                   This help
 "#;
 
@@ -607,11 +608,13 @@ fn cmd_bookmark(db: &Database, args: &[String], is_json: bool) -> ExitCode {
                 if is_json || is_list_json {
                     let items: Vec<_> = bms
                         .iter()
-                        .map(|(alias, path)| serde_json::json!({ "alias": alias, "path": path }))
+                        .map(|(alias, path, description)| {
+                            serde_json::json!({ "alias": alias, "path": path, "description": description })
+                        })
                         .collect();
                     println!("{}", serde_json::to_string_pretty(&items).unwrap());
                 } else {
-                    for (alias, path) in bms {
+                    for (alias, path, _description) in bms {
                         println!("{:20}  {}", alias, path);
                     }
                 }
@@ -636,6 +639,91 @@ fn cmd_bookmark(db: &Database, args: &[String], is_json: bool) -> ExitCode {
             return ExitCode::from(1);
         }
         ExitCode::SUCCESS
+    } else if args[0] == "edit" {
+        if args.len() < 2 {
+            eprintln!("Usage: hop book edit <alias> [--alias <new>] [--path <path>] [--description <text>]");
+            return ExitCode::from(2);
+        }
+        let alias = &args[1];
+
+        // Parse --alias, --path, --description flags
+        let mut new_alias: Option<&str> = None;
+        let mut new_path: Option<&str> = None;
+        let mut new_description: Option<&str> = None;
+
+        let mut i = 2;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--alias" => {
+                    i += 1;
+                    new_alias = args.get(i).map(String::as_str);
+                }
+                "--path" => {
+                    i += 1;
+                    new_path = args.get(i).map(String::as_str);
+                }
+                "--description" => {
+                    i += 1;
+                    new_description = args.get(i).map(String::as_str);
+                }
+                _ => {
+                    eprintln!("unknown flag: {}\nUsage: hop book edit <alias> [--alias <new>] [--path <path>] [--description <text>]", args[i]);
+                    return ExitCode::from(2);
+                }
+            }
+            i += 1;
+        }
+
+        if new_alias.is_none() && new_path.is_none() && new_description.is_none() {
+            // No flags: print current values
+            match db.bookmarks() {
+                Ok(bms) => {
+                    if let Some((_a, _p, _d)) = bms.iter().find(|(a, _, _)| a == alias) {
+                        let (a, p, d) = bms.iter().find(|(a, _, _)| *a == *alias).unwrap();
+                        println!("alias:       {}", a);
+                        println!("path:        {}", p);
+                        println!("description: {}", d);
+                    } else {
+                        eprintln!("no such bookmark: {}", alias);
+                        return ExitCode::from(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("db error: {}", e);
+                    return ExitCode::from(1);
+                }
+            }
+            return ExitCode::SUCCESS;
+        }
+
+        // Validate path if provided
+        let new_path_owned: Option<String> = 'blk: {
+            if let Some(p) = new_path {
+                let expanded = expand_home(p);
+                if !expanded.is_dir() {
+                    eprintln!("not a directory: {}", expanded.display());
+                    break 'blk None;
+                }
+                break 'blk Some(expanded.to_string_lossy().into_owned());
+            }
+            None
+        };
+
+        if new_path_owned.is_none() && new_path.is_some() {
+            return ExitCode::from(1);
+        }
+
+        match db.edit_bookmark(alias, new_alias, new_path_owned.as_deref(), new_description) {
+            Ok(0) => {
+                eprintln!("no such bookmark: {}", alias);
+                ExitCode::from(1)
+            }
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("edit failed: {}", e);
+                ExitCode::from(1)
+            }
+        }
     } else {
         let alias = &args[0];
         if args.len() > 1 {
@@ -810,7 +898,7 @@ fn score_candidates(db: &Database, cfg: &Config, query: &str) -> Vec<Scored> {
     let mut cands: Vec<Scored> = Vec::new();
 
     if let Ok(bms) = db.bookmarks() {
-        for (alias, path) in bms {
+        for (alias, path, _description) in bms {
             if let Some(s) = scorer.score_bookmark(&alias, &path, query) {
                 if Path::new(&s.path).is_dir() {
                     cands.push(s);
@@ -877,7 +965,7 @@ fn collect_breakdowns(
 
     // score bookmarks
     if let Ok(bms) = db.bookmarks() {
-        for (alias, path) in bms {
+        for (alias, path, _description) in bms {
             if let Some(b) = scorer.score_bookmark_breakdown(&alias, &path, query) {
                 if Path::new(&b.path).is_dir() && b.total > cfg.min_score {
                     breakdowns.push(b);
@@ -1024,24 +1112,25 @@ fn cmd_export(db: &Database, format: &str) -> ExitCode {
                         "is_git_repo": r.is_git_repo,
                     })
                 }).collect::<Vec<_>>(),
-                "bookmarks": bookmarks.iter().map(|(alias, path)| {
+                "bookmarks": bookmarks.iter().map(|(alias, path, description)| {
                     serde_json::json!({
                         "alias": alias,
                         "path": path,
+                        "description": description,
                     })
                 }).collect::<Vec<_>>(),
             });
             println!("{}", serde_json::to_string_pretty(&payload).unwrap());
         }
         "csv" => {
-            // Header: path,visits,last_visited,is_bookmark,alias
-            println!("path,visits,last_visited,is_bookmark,alias");
+            // Header: path,visits,last_visited,is_bookmark,alias,description
+            println!("path,visits,last_visited,is_bookmark,alias,description");
             for r in &history {
-                println!("{},{},{},false,", r.path, r.visits, r.last_visited);
+                println!("{},{},{},false,,", r.path, r.visits, r.last_visited);
             }
-            for (alias, path) in &bookmarks {
+            for (alias, path, description) in &bookmarks {
                 // For bookmarks, visits=0 and is_bookmark=true
-                println!("{},0,0,true,{}", path, alias);
+                println!("{},0,0,true,{},{}", path, alias, description);
             }
         }
         "tsv" => {
@@ -1051,8 +1140,8 @@ fn cmd_export(db: &Database, format: &str) -> ExitCode {
                     r.path, r.visits, r.last_visited, r.is_git_repo
                 );
             }
-            for (alias, path) in &bookmarks {
-                println!("bookmark\t{}:{}\t0\t0\tfalse", alias, path);
+            for (alias, path, description) in &bookmarks {
+                println!("bookmark\t{}:{}\t0\t0\tfalse\t{}", alias, path, description);
             }
         }
         _ => {

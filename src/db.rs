@@ -12,7 +12,7 @@ pub const APP_NAME: &str = "hop";
 pub const DB_NAME: &str = "hop.db";
 pub const LEGACY_APP_NAME: &str = "fuzzy-cd";
 pub const LEGACY_DB_NAME: &str = "fuzzy-cd.db";
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub struct Database {
     conn: Connection,
@@ -221,6 +221,14 @@ impl Database {
             // Index parent column for efficient child-lookup queries.
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_dir_index_parent ON dir_index(parent)",
+                [],
+            )?;
+        }
+
+        if version < 3 {
+            // Add description column to bookmarks table.
+            self.conn.execute(
+                "ALTER TABLE bookmarks ADD COLUMN description TEXT NOT NULL DEFAULT ''",
                 [],
             )?;
         }
@@ -477,12 +485,18 @@ impl Database {
             .optional()
     }
 
-    pub fn bookmarks(&self) -> rusqlite::Result<Vec<(String, String)>> {
+    pub fn bookmarks(&self) -> rusqlite::Result<Vec<(String, String, String)>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT alias, path FROM bookmarks ORDER BY alias")?;
+            .prepare("SELECT alias, path, description FROM bookmarks ORDER BY alias")?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
             .flatten()
             .collect();
         Ok(rows)
@@ -490,7 +504,7 @@ impl Database {
 
     pub fn set_bookmark(&self, alias: &str, path: &str) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO bookmarks(alias, path, created_at) VALUES(?1, ?2, ?3)
+            "INSERT INTO bookmarks(alias, path, created_at, description) VALUES(?1, ?2, ?3, '')
              ON CONFLICT(alias) DO UPDATE SET path = ?2",
             params![alias, path, now_secs()],
         )?;
@@ -500,6 +514,39 @@ impl Database {
     pub fn remove_bookmark(&self, alias: &str) -> rusqlite::Result<usize> {
         self.conn
             .execute("DELETE FROM bookmarks WHERE alias = ?1", params![alias])
+    }
+
+    /// Edit bookmark fields. At least one of new_alias, new_path, or new_description
+    /// must be Some(...). Returns the number of rows updated (0 or 1).
+    pub fn edit_bookmark(
+        &self,
+        alias: &str,
+        new_alias: Option<&str>,
+        new_path: Option<&str>,
+        new_description: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        let mut parts: Vec<String> = Vec::new();
+
+        if let Some(a) = new_alias {
+            parts.push(format!("alias = '{}'", a.replace("'", "''")));
+        }
+        if let Some(p) = new_path {
+            parts.push(format!("path = '{}'", p.replace("'", "''")));
+        }
+        if let Some(d) = new_description {
+            parts.push(format!("description = '{}'", d.replace("'", "''")));
+        }
+
+        if parts.is_empty() {
+            return Ok(0);
+        }
+
+        let sql = format!(
+            "UPDATE bookmarks SET {} WHERE alias = '{}'",
+            parts.join(", "),
+            alias.replace("'", "''")
+        );
+        self.conn.execute(&sql, [])
     }
 
     pub fn upsert_indexed_dir(&self, path: &str) -> rusqlite::Result<()> {
