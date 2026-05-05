@@ -112,7 +112,8 @@ fn run_loop<W: Write>(
                     query = filter_buf.clone();
                     filter_buf.clear();
                     filter_mode = false;
-                    let (new_items, new_last) = compute_items(db, &query, Some(&last_computed_query));
+                    let (new_items, new_last) =
+                        compute_items(db, &query, Some(&last_computed_query));
                     items = new_items;
                     last_computed_query = new_last;
                     cursor_idx = 0;
@@ -152,21 +153,24 @@ fn run_loop<W: Write>(
                 }
                 (KeyCode::Backspace, _) if !query.is_empty() => {
                     query.pop();
-                    let (new_items, new_last) = compute_items(db, &query, Some(&last_computed_query));
+                    let (new_items, new_last) =
+                        compute_items(db, &query, Some(&last_computed_query));
                     items = new_items;
                     last_computed_query = new_last;
                     cursor_idx = 0;
                 }
                 (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                     query.clear();
-                    let (new_items, new_last) = compute_items(db, &query, Some(&last_computed_query));
+                    let (new_items, new_last) =
+                        compute_items(db, &query, Some(&last_computed_query));
                     items = new_items;
                     last_computed_query = new_last;
                     cursor_idx = 0;
                 }
                 (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
                     query.push(c);
-                    let (new_items, new_last) = compute_items(db, &query, Some(&last_computed_query));
+                    let (new_items, new_last) =
+                        compute_items(db, &query, Some(&last_computed_query));
                     items = new_items;
                     last_computed_query = new_last;
                     cursor_idx = 0;
@@ -194,7 +198,11 @@ fn run_loop<W: Write>(
     }
 }
 
-fn compute_items(db: &Database, query: &str, last_query: Option<&str>) -> (Vec<PickerItem>, String) {
+fn compute_items(
+    db: &Database,
+    query: &str,
+    last_query: Option<&str>,
+) -> (Vec<PickerItem>, String) {
     if let Some(last) = last_query {
         if query == last {
             return (vec![], last.to_string());
@@ -229,7 +237,7 @@ fn compute_items(db: &Database, query: &str, last_query: Option<&str>) -> (Vec<P
         }
         if let Ok(rows) = db.history_rows() {
             for r in rows {
-                if let Some(s) = scorer.score_history(&r, query, None) {
+                if let Some(s) = scorer.score_history(&r, query, None, None) {
                     if std::path::Path::new(&s.path).is_dir() {
                         candidates.push(s);
                     }

@@ -54,13 +54,22 @@ impl Scorer {
     /// `query_lower` is the lowercased query, pre-computed once at the batch
     /// level to avoid O(n) redundant allocations. If `None`, it is computed
     /// internally (useful for single-call sites).
+    ///
+    /// `fuzzy_score`: `Some(i64)` when fuzzy matching has already been performed
+    /// externally (e.g., for regex/negation paths that matched via
+    /// `path_matches_with_regex`); `None` to run `SkimMatcherV2::fuzzy_indices`
+    /// inline and include the result in the total.
     pub fn score_history(
         &self,
         row: &HistoryRow,
         query: &str,
         query_lower: Option<&str>,
+        fuzzy_score: Option<i64>,
     ) -> Option<Scored> {
-        let (fuzzy, indices) = self.matcher.fuzzy_indices(&row.path, query)?;
+        let (fuzzy, indices) = match fuzzy_score {
+            Some(f) => (f, vec![]),
+            None => self.matcher.fuzzy_indices(&row.path, query)?,
+        };
         let query_lower = query_lower.unwrap_or_else(|| query.to_lowercase().leak());
         let basename_lower = basename_lower(&row.path);
         let basename_bonus = basename_lower.contains(query_lower);
@@ -121,93 +130,30 @@ impl Scorer {
     ///
     /// `pattern_lower` is the lowercased pattern, pre-computed once at the batch
     /// level to avoid O(n) redundant allocations. If `None`, computed internally.
+    ///
+    /// Deprecated: use `score_history(row, pattern, pattern_lower, Some(0))` instead.
     pub fn score_history_boosted(
         &self,
         row: &HistoryRow,
         pattern: &str,
         pattern_lower: Option<&str>,
     ) -> Option<Scored> {
-        // No fuzzy match — we already know the pattern matched the path.
-        // Score purely on bonus components; fuzzy=0 for neutral ranking.
-        let basename_lower = basename_lower(&row.path);
-        let pattern_lower = pattern_lower.unwrap_or_else(|| pattern.to_lowercase().leak());
-        let basename_bonus = basename_lower.contains(pattern_lower);
-
-        let age_days = (self.now - row.last_visited) / 86_400.0;
-        let recency = if age_days < 1.0 {
-            3.0
-        } else if age_days < 7.0 {
-            2.0
-        } else if age_days < 30.0 {
-            1.0
-        } else {
-            0.5
-        };
-        let visit_boost = (row.visits as f64).sqrt().min(5.0);
-        let depth = row.path.matches('/').count().max(1) as f64;
-        let shortness = (10.0 / depth).max(1.0);
-
-        let score = (visit_boost * 20.0) as i64
-            + (recency * 15.0) as i64
-            + if row.is_git_repo { 30 } else { 0 }
-            + if basename_bonus { 40 } else { 0 }
-            + (shortness * 5.0) as i64;
-
-        Some(Scored {
-            path: row.path.clone(),
-            score,
-            source: Source::History,
-            matched_indices: vec![],
-        })
+        self.score_history(row, pattern, pattern_lower, Some(0))
     }
 
     /// Breakdown variant of score_history_boosted.
     ///
     /// `pattern_lower` is the lowercased pattern, pre-computed once at the batch
     /// level. If `None`, computed internally.
+    ///
+    /// Deprecated: use `score_history_breakdown(row, pattern, pattern_lower, Some(0))` instead.
     pub fn score_history_breakdown_boosted(
         &self,
         row: &HistoryRow,
         pattern: &str,
         pattern_lower: Option<&str>,
     ) -> Option<ScoreBreakdown> {
-        let basename_lower = basename_lower(&row.path);
-        let pattern_lower = pattern_lower.unwrap_or_else(|| pattern.to_lowercase().leak());
-        let basename_bonus = basename_lower.contains(pattern_lower) as i64;
-
-        let age_days = (self.now - row.last_visited) / 86_400.0;
-        let recency = if age_days < 1.0 {
-            3.0
-        } else if age_days < 7.0 {
-            2.0
-        } else if age_days < 30.0 {
-            1.0
-        } else {
-            0.5
-        };
-        let visit_boost = (row.visits as f64).sqrt().min(5.0);
-        let depth = row.path.matches('/').count().max(1) as f64;
-        let shortness = (10.0 / depth).max(1.0);
-        let git = if row.is_git_repo { 30 } else { 0 };
-
-        // For boosted scoring, fuzzy=0 since we already matched via pattern/regex
-        let total = (visit_boost * 20.0) as i64
-            + (recency * 15.0) as i64
-            + git
-            + basename_bonus * 40
-            + (shortness * 5.0) as i64;
-
-        Some(ScoreBreakdown {
-            path: row.path.clone(),
-            total,
-            fuzzy: 0,
-            visits: (visit_boost * 20.0) as i64,
-            recency: (recency * 15.0) as i64,
-            git,
-            basename: basename_bonus * 40,
-            shortness: (shortness * 5.0) as i64,
-            source: Source::History,
-        })
+        self.score_history_breakdown(row, pattern, pattern_lower, Some(0))
     }
 
     /// Score a history row and return per-component breakdown.
@@ -215,13 +161,20 @@ impl Scorer {
     /// `query_lower` is the lowercased query, pre-computed once at the batch
     /// level to avoid O(n) redundant allocations. If `None`, it is computed
     /// internally.
+    ///
+    /// `fuzzy_score`: `Some(i64)` when fuzzy matching has already been performed
+    /// externally (fuzzy=0 for boosted); `None` to run fuzzy matching inline.
     pub fn score_history_breakdown(
         &self,
         row: &HistoryRow,
         query: &str,
         query_lower: Option<&str>,
+        fuzzy_score: Option<i64>,
     ) -> Option<ScoreBreakdown> {
-        let (fuzzy, _) = self.matcher.fuzzy_indices(&row.path, query)?;
+        let fuzzy = match fuzzy_score {
+            Some(f) => f,
+            None => self.matcher.fuzzy_indices(&row.path, query)?.0,
+        };
         let query_lower = query_lower.unwrap_or_else(|| query.to_lowercase().leak());
         let basename_lower = basename_lower(&row.path);
         let basename_bonus = basename_lower.contains(query_lower) as i64;
@@ -437,12 +390,12 @@ pub fn score_history_batch(
     let scored: Vec<Scored> = if is_regex || is_negation {
         filtered
             .iter()
-            .filter_map(|row| scorer.score_history_boosted(row, effective, Some(&effective_lower)))
+            .filter_map(|row| scorer.score_history(row, effective, Some(&effective_lower), Some(0)))
             .collect()
     } else {
         filtered
             .iter()
-            .filter_map(|row| scorer.score_history(row, match_query, Some(&query_lower)))
+            .filter_map(|row| scorer.score_history(row, match_query, Some(&query_lower), None))
             .collect()
     };
     let filter_applied = is_regex || is_negation;
@@ -495,9 +448,9 @@ pub fn score_history_breakdown_batch(
         .iter()
         .filter_map(|row| {
             if is_regex || is_negation {
-                scorer.score_history_breakdown_boosted(row, effective, Some(&effective_lower))
+                scorer.score_history_breakdown(row, effective, Some(&effective_lower), Some(0))
             } else {
-                scorer.score_history_breakdown(row, match_query, Some(&query_lower))
+                scorer.score_history_breakdown(row, match_query, Some(&query_lower), None)
             }
         })
         .collect()
@@ -520,10 +473,15 @@ mod tests {
     fn basename_match_outranks_substring_in_middle() {
         let s = Scorer::new(1_000_000.0);
         let a = s
-            .score_history(&row("/a/project", 1, 0.0, true), "project", None)
+            .score_history(&row("/a/project", 1, 0.0, true), "project", None, None)
             .unwrap();
         let b = s
-            .score_history(&row("/projectile/x/y", 1, 0.0, false), "project", None)
+            .score_history(
+                &row("/projectile/x/y", 1, 0.0, false),
+                "project",
+                None,
+                None,
+            )
             .unwrap();
         assert!(
             a.score > b.score,
@@ -535,10 +493,10 @@ mod tests {
     fn recent_outranks_old_same_visits() {
         let s = Scorer::new(1_000_000.0);
         let a = s
-            .score_history(&row("/a/proj", 1, 0.0, false), "proj", None)
+            .score_history(&row("/a/proj", 1, 0.0, false), "proj", None, None)
             .unwrap();
         let b = s
-            .score_history(&row("/b/proj", 1, 45.0, false), "proj", None)
+            .score_history(&row("/b/proj", 1, 45.0, false), "proj", None, None)
             .unwrap();
         assert!(a.score > b.score);
     }
@@ -548,7 +506,7 @@ mod tests {
         let s = Scorer::new(1_000_000.0);
         let bm = s.score_bookmark("proj", "/any/path", "proj").unwrap();
         let hist = s
-            .score_history(&row("/x/proj", 1, 0.0, false), "proj", None)
+            .score_history(&row("/x/proj", 1, 0.0, false), "proj", None, None)
             .unwrap();
         assert!(bm.score > hist.score);
     }
@@ -557,7 +515,7 @@ mod tests {
     fn no_match_returns_none() {
         let s = Scorer::new(1_000_000.0);
         assert!(s
-            .score_history(&row("/a/b", 1, 0.0, false), "zzzzzz", None)
+            .score_history(&row("/a/b", 1, 0.0, false), "zzzzzz", None, None)
             .is_none());
     }
 
