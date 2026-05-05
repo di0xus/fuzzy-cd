@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # hop install.sh — curl-based installation / upgrade
-# Usage: curl -fsSL https://raw.githubusercontent.com/di0xus/hop/main/install.sh | bash
+# Usage: curl -fsSL https://codeberg.org/dioxus/hop/raw/branch/main/install.sh | bash
 set -e
 
-REPO="di0xus/hop"
+REPO="dioxus/hop"
 INSTALL_DIR="${HOP_INSTALL_DIR:-$HOME/.local/bin}"
 BINARY="$INSTALL_DIR/hop"
-RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
-API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+RELEASE_BASE="https://codeberg.org/${REPO}/releases/download"
+API_URL="https://codeberg.org/api/v1/repos/${REPO}/releases/latest"
 
 detect_os() {
     case "$(uname -s)" in
@@ -28,7 +28,7 @@ detect_arch() {
 say() { echo "hop: $1"; }
 
 latest_version() {
-    # Fetch tag_name from GitHub API, strip leading 'v'
+    # Fetch tag_name from Codeberg API, strip leading 'v'
     curl -fsSL "$API_URL" | grep '"tag_name"' | cut -d '"' -f4 | sed 's/^v//'
 }
 
@@ -53,14 +53,13 @@ case "$(detect_os)-$(detect_arch)" in
 esac
 
 binary_name="hop-${target}"
-url="${RELEASE_URL}/${binary_name}"
 
 if [ -x "$BINARY" ]; then
     local_ver=$(local_version)
     latest_ver=$(latest_version)
 
     if [ -z "$latest_ver" ]; then
-        say "warning: could not determine latest version — checking GitHub directly"
+        say "warning: could not determine latest version — checking Codeberg directly"
     elif [ "$local_ver" = "$latest_ver" ]; then
         say "already on latest version ($latest_ver)"
         exit 0
@@ -74,10 +73,12 @@ if [ -x "$BINARY" ]; then
     cp "$BINARY" "$backup"
 else
     mkdir -p "$INSTALL_DIR"
+    latest_ver=$(latest_version)
 fi
 
 say "installing to ${INSTALL_DIR}..."
-say "downloading ${url}..."
+say "downloading ${latest_ver}..."
+url="${RELEASE_BASE}/v${latest_ver}/${binary_name}"
 curl -fsSL "$url" -o "$BINARY"
 chmod +x "$BINARY"
 

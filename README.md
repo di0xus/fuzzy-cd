@@ -32,7 +32,7 @@ Type a fragment of a directory name — `h work` — and hop jumps you to the be
 ### One-liner (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/di0xus/hop/main/install.sh | bash
+curl -fsSL https://codeberg.org/dioxus/hop/raw/branch/main/install.sh | bash
 ```
 
 Downloads the latest binary for your platform, places it in `~/.local/bin`, and prints instructions if you need to add that to your `PATH`.
@@ -40,7 +40,7 @@ Downloads the latest binary for your platform, places it in `~/.local/bin`, and 
 ### From source (requires Rust)
 
 ```bash
-git clone https://github.com/di0xus/hop
+git clone https://codeberg.org/dioxus/hop
 cd hop
 cargo install --path .
 ```
