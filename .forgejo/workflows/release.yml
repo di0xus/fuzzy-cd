@@ -48,7 +48,9 @@ jobs:
         env:
           CODESIGN_TOKEN: ${{ secrets.CODESIGN_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          # Use GITEA_REF on Codeberg (format: refs/tags/v1.2.3)
+          TAG="${GITEA_REF#refs/tags/}"
+          echo "Publishing release for tag: $TAG"
           # Create release if it doesn't exist
           RELEASE_ID=$(curl -s -X POST \
             -H "Authorization: token $CODESIGN_TOKEN" \
