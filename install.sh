@@ -84,7 +84,9 @@ chmod +x "$BINARY"
 
 # Verify
 if ! [ -x "$BINARY" ]; then
-    echo "hop: download failed — binary not found at ${BINARY}" >&2
+    say "hop: warning: download failed or Codeberg file serving is down (HTTP 502)"
+    say "hop: try again in a few minutes, or install from source:"
+    say "  git clone https://codeberg.org/dioxus/hop && cd hop && cargo install --path ."
     exit 1
 fi
 
