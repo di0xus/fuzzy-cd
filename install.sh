@@ -29,7 +29,7 @@ say() { echo "hop: $1"; }
 
 latest_version() {
     # Fetch tag_name from Codeberg API, strip leading 'v'
-    curl -fsSL "$API_URL" | grep '"tag_name"' | cut -d '"' -f4 | sed 's/^v//'
+    curl -fsSL "$API_URL" | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))"
 }
 
 local_version() {
