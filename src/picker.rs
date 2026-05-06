@@ -1,4 +1,5 @@
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
     QueueableCommand,
 };
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::db::{now_secs, Database};
 use crate::score::{Scored, Scorer, Source};
@@ -216,16 +218,20 @@ fn compute_items(
 
     if query.is_empty() {
         if let Ok(rows) = db.recent(limit) {
-            for r in rows {
-                if std::path::Path::new(&r.path).is_dir() {
-                    candidates.push(Scored {
-                        path: r.path,
-                        score: r.last_visited as i64,
-                        source: Source::History,
-                        matched_indices: vec![],
-                    });
-                }
-            }
+            // Parallelize is_dir checks to avoid blocking TUI thread
+            let paths: Vec<_> = rows.iter().map(|r| r.path.clone()).collect();
+            let live: Vec<_> = paths
+                .par_iter()
+                .filter(|p| Path::new(p).is_dir())
+                .cloned()
+                .collect();
+            let live_set: std::collections::HashSet<_> = live.iter().collect();
+            candidates.extend(rows.iter().filter(|r| live_set.contains(&r.path)).map(|r| Scored {
+                path: r.path.clone(),
+                score: r.last_visited as i64,
+                source: Source::History,
+                matched_indices: vec![],
+            }));
         }
     } else {
         if let Ok(bms) = db.bookmarks() {
@@ -236,13 +242,19 @@ fn compute_items(
             }
         }
         if let Ok(rows) = db.history_rows() {
-            for r in rows {
-                if let Some(s) = scorer.score_history(&r, query, None, None) {
-                    if std::path::Path::new(&s.path).is_dir() {
-                        candidates.push(s);
-                    }
-                }
-            }
+            // Score all candidates first, then parallel-filter by is_dir
+            let scored: Vec<_> = rows
+                .iter()
+                .filter_map(|r| scorer.score_history(r, query, None, None))
+                .collect();
+            let paths: Vec<_> = scored.iter().map(|s| s.path.clone()).collect();
+            let live: Vec<_> = paths
+                .par_iter()
+                .filter(|p| Path::new(p).is_dir())
+                .cloned()
+                .collect();
+            let live_set: std::collections::HashSet<_> = live.into_iter().collect();
+            candidates.extend(scored.into_iter().filter(|s| live_set.contains(&s.path)));
         }
     }
 
