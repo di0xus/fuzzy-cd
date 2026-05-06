@@ -33,5 +33,6 @@ pub mod index;
 pub mod init;
 pub mod picker;
 pub mod score;
+pub mod style;
 
 pub use db::Database;

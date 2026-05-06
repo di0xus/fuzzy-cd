@@ -1,3 +1,4 @@
+use crate::style::Fmt;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -71,7 +72,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let db = match Database::open() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("db open failed: {}", e);
+            eprintln!("{} db open failed: {}", Fmt::error("✗"), e);
             return ExitCode::from(2);
         }
     };
@@ -82,7 +83,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
     if cfg.auto_prune_on_startup {
         if let Ok(removed) = db.prune_auto(&cfg.skip_dirs) {
             if verbose && removed > 0 {
-                eprintln!("auto-pruned {} stale entries", removed);
+                eprintln!(
+                    "{} auto-pruned {} stale entries",
+                    Fmt::success("✓"),
+                    removed
+                );
             }
         }
     }
@@ -124,18 +129,18 @@ pub fn run(args: Vec<String>) -> ExitCode {
             };
 
             let Some(raw_arg) = arg else {
-                eprintln!("Usage: hop add <path> [--dry-run]");
+                eprintln!("{} Usage: {} add <path> [--dry-run]", Fmt::error("✗"), Fmt::bold("hop"));
                 return ExitCode::from(2);
             };
 
             if raw_arg.is_empty() {
-                eprintln!("empty path; did you mean to run `hop` without arguments?");
+                eprintln!("{} empty path; did you mean to run {} without arguments?", Fmt::warn("⚠"), Fmt::bold("hop"));
                 return ExitCode::from(1);
             }
 
             let path = expand_home(raw_arg);
             if !path.is_dir() {
-                eprintln!("not a directory: {}", path.display());
+                eprintln!("{} not a directory: {}", Fmt::error("✗"), Fmt::path(&path.display().to_string()));
                 return ExitCode::from(1);
             }
 
@@ -144,39 +149,47 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 .unwrap_or_else(|| path.to_string_lossy().into_owned());
 
             if dry_run {
-                // Check if entry exists to determine "would add" vs "would create"
                 let existing = db
                     .history_rows()
                     .ok()
                     .and_then(|rows| rows.into_iter().find(|r| r.path == canon));
                 if let Some(row) = existing {
-                    println!("would add {} with {} visits", canon, row.visits + 1);
+                    println!("{} would add {} with {} visits", Fmt::warn("→"), Fmt::path(&canon), Fmt::bold(&format!("{}", row.visits + 1)));
                 } else {
-                    println!("would create new entry: {}", canon);
+                    println!("{} would create new entry: {}", Fmt::warn("→"), Fmt::path(&canon));
                 }
                 return ExitCode::SUCCESS;
             }
             let _ = db.record_visit(&canon);
+            println!("{} recorded: {}", Fmt::success("✓"), Fmt::path(&canon));
             ExitCode::SUCCESS
         }
         "rm" => {
             let Some(arg) = positional(&args, 2) else {
-                eprintln!("Usage: hop rm <path>");
+                eprintln!(
+                    "{} Usage: {} rm <path>",
+                    Fmt::error("✗"),
+                    Fmt::bold("hop")
+                );
                 return ExitCode::from(2);
             };
             let path = expand_home(arg);
             let removed = match db.forget(&path.to_string_lossy()) {
                 Ok(n) => n,
                 Err(e) => {
-                    eprintln!("remove failed: {}", e);
+                    eprintln!("{} remove failed: {}", Fmt::error("✗"), e);
                     return ExitCode::from(1);
                 }
             };
             if removed > 0 {
-                println!("removed: {}", path.display());
+                println!("{} removed: {}", Fmt::success("✓"), Fmt::path(&path.display().to_string()));
                 ExitCode::SUCCESS
             } else {
-                println!("not found in history: {}", path.display());
+                println!(
+                    "{} not found in history: {}",
+                    Fmt::warn("⚠"),
+                    Fmt::path(&path.display().to_string())
+                );
                 ExitCode::from(1)
             }
         }
@@ -189,24 +202,29 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 .collect::<Vec<_>>()
                 .join(" ");
             if query.is_empty() {
-                eprintln!("Usage: hop forget|zap <query> [--dry-run]");
+                eprintln!(
+                    "{} Usage: {} {} <query> [--dry-run]",
+                    Fmt::error("✗"),
+                    Fmt::bold("hop"),
+                    Fmt::dim("forget|zap")
+                );
                 return ExitCode::from(2);
             }
             match find_best(&db, &cfg, &query) {
                 Some(path) => {
                     if dry_run {
-                        println!("would forget: {}", path);
+                        println!("{} would forget: {}", Fmt::warn("→"), Fmt::path(&path));
                         return ExitCode::SUCCESS;
                     }
                     let removed = match db.forget(&path) {
                         Ok(n) => n,
                         Err(e) => {
-                            eprintln!("forget failed: {}", e);
+                            eprintln!("{} forget failed: {}", Fmt::error("✗"), e);
                             0
                         }
                     };
                     if removed > 0 {
-                        println!("forgot: {}", path);
+                        Fmt::ok_line(&format!("forgot: {}", Fmt::path(&path)));
                     } else {
                         println!("not found in history: {}", path);
                     }
@@ -279,7 +297,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             let top_rows = match db.top(10) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("top query failed: {}", e);
+                    eprintln!("{} top query failed: {}", Fmt::error("✗"), e);
                     return ExitCode::from(1);
                 }
             };
@@ -291,7 +309,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             let recent_rows = match db.recent(n) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("recent query failed: {}", e);
+                    eprintln!("{} recent query failed: {}", Fmt::error("✗"), e);
                     return ExitCode::from(1);
                 }
             };
@@ -331,7 +349,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
-                        eprintln!("import dry-run failed: {}", e);
+                        eprintln!("{} import dry-run failed: {}", Fmt::error("✗"), e);
                         ExitCode::from(1)
                     }
                 }
@@ -343,17 +361,17 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     "thefuck" => import::import_thefuck(&db, file),
                     "zsh" => import::import_zsh(&db, file),
                     _ => {
-                        eprintln!("unknown source: {}", source);
+                        eprintln!("{} unknown source: {}", Fmt::error("✗"), Fmt::dim(source));
                         return ExitCode::from(2);
                     }
                 };
                 match result {
                     Ok(stats) => {
-                        println!("imported {}, skipped {}", stats.imported, stats.skipped);
+                        println!("{} imported {}, skipped {}", Fmt::success("✓"), Fmt::bold(&format!("{}", stats.imported)), Fmt::bold(&format!("{}", stats.skipped)));
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
-                        eprintln!("import failed: {}", e);
+                        eprintln!("{} import failed: {}", Fmt::error("✗"), e);
                         ExitCode::from(1)
                     }
                 }
@@ -368,7 +386,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     Ok((history_stale, index_stale)) => {
                         let total = history_stale.len() + index_stale.len();
                         if total == 0 {
-                            println!("nothing to prune");
+                            println!("{} nothing to prune", Fmt::dim("·"));
                         } else {
                             println!("history ({}):", history_stale.len());
                             for p in &history_stale {
@@ -386,7 +404,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                         }
                     }
                     Err(e) => {
-                        eprintln!("prune dry-run failed: {}", e);
+                        eprintln!("{} prune dry-run failed: {}", Fmt::error("✗"), e);
                         return ExitCode::from(1);
                     }
                 }
@@ -414,7 +432,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                         }
                     }
                     Err(e) => {
-                        eprintln!("prune failed: {}", e);
+                        eprintln!("{} prune failed: {}", Fmt::error("✗"), e);
                         return ExitCode::from(1);
                     }
                 }
@@ -630,7 +648,7 @@ fn cmd_bookmark(db: &Database, args: &[String], is_json: bool) -> ExitCode {
         let removed = match db.remove_bookmark(&args[1]) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("remove_bookmark failed: {}", e);
+                eprintln!("{} remove_bookmark failed: {}", Fmt::error("✗"), e);
                 return ExitCode::from(1);
             }
         };
@@ -814,7 +832,7 @@ fn cmd_stats(db: &Database, verbose: bool) -> ExitCode {
                 let top10 = match db.top(10) {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("top query failed: {}", e);
+                        eprintln!("{} top query failed: {}", Fmt::error("✗"), e);
                         return ExitCode::from(1);
                     }
                 };
@@ -848,7 +866,7 @@ fn cmd_stats(db: &Database, verbose: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("stats failed: {}", e);
+            eprintln!("{} stats failed: {}", Fmt::error("✗"), e);
             ExitCode::from(1)
         }
     }
@@ -936,9 +954,16 @@ fn score_candidates(db: &Database, cfg: &Config, query: &str) -> Vec<Scored> {
 }
 
 fn print_rows(rows: &[HistoryRow]) {
+    Fmt::divider();
     for r in rows {
-        println!("{:4} visits   {}", r.visits, r.path);
+        println!(
+            "{}  {}  {}",
+            Fmt::bold(&format!("{:>4}", r.visits)),
+            Fmt::dim("visits"),
+            Fmt::path(&r.path)
+        );
     }
+    Fmt::divider();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
