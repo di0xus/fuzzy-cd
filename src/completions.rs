@@ -247,6 +247,12 @@ function __hop_using_command
     test (count $cmd) -ge 2; and test "$cmd[2]" = "$argv[1]"
 end
 
+# Two-token variant: fires only when first two tokens match (e.g., book rm)
+function __hop_using_command2
+    set -l cmd (commandline -opc)
+    test (count $cmd) -ge 3; and test "$cmd[2]" = "$argv[1]"; and test "$cmd[3]" = "$argv[2]"
+end
+
 function __hop_bookmark_aliases
     command hop book list 2>/dev/null | awk '{print $1}'
 end
@@ -293,10 +299,10 @@ complete -c hop -n '__hop_using_command import' -l dry-run -d 'preview import wi
 # book subcommand
 complete -c hop -n '__hop_using_command book'     -a 'list rm' -d 'bookmark action'
 complete -c hop -n '__hop_using_command book'     -l json -s j -d 'output JSON'
-complete -c hop -n '__hop_using_command book rm'  -a '(__hop_bookmark_aliases)'
+complete -c hop -n '__hop_using_command2 book rm'  -a '(__hop_bookmark_aliases)'
 complete -c hop -n '__hop_using_command bookmark' -a 'list rm' -d 'bookmark action'
 complete -c hop -n '__hop_using_command bookmark' -l json -s j -d 'output JSON'
-complete -c hop -n '__hop_using_command bookmark rm' -a '(__hop_bookmark_aliases)'
+complete -c hop -n '__hop_using_command2 bookmark rm' -a '(__hop_bookmark_aliases)'
 
 # add with --dry-run
 complete -c hop -n '__hop_using_command add' -l dry-run -d 'preview what would be added'

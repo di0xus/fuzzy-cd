@@ -182,12 +182,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         }
         "forget" | "zap" => {
             let dry_run = args[2..].iter().any(|a| a == "--dry-run");
-            let query: String = args[2..]
-                .iter()
-                .filter(|a| *a != "--dry-run")
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(" ");
+            let query = extract_query(&args[2..], &["--dry-run"]);
             if query.is_empty() {
                 eprintln!("Usage: hop forget|zap <query> [--dry-run]");
                 return ExitCode::from(2);
@@ -235,12 +230,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         "score" => {
-            let query = args[2..]
-                .iter()
-                .map(String::as_str)
-                .filter(|s| *s != "--")
-                .collect::<Vec<_>>()
-                .join(" ");
+            let query = extract_query(&args[2..], &["--json"]);
             let is_json = args.iter().any(|a| a == "--json");
             if query.is_empty() {
                 eprintln!("Usage: hop score <query> [--json]");
@@ -249,12 +239,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             cmd_score(&db, &cfg, &query, is_json)
         }
         "list" => {
-            let query = args[2..]
-                .iter()
-                .map(String::as_str)
-                .filter(|s| *s != "--")
-                .collect::<Vec<_>>()
-                .join(" ");
+            let query = extract_query(&args[2..], &["--json", "--limit"]);
             let is_json = args.iter().any(|a| a == "--json");
             let limit = args
                 .iter()
@@ -507,6 +492,15 @@ fn positional(args: &[String], idx: usize) -> Option<&str> {
     } else {
         Some(a.as_str())
     }
+}
+
+/// Extract a query string from a slice of args, excluding any flags in `exclude`.
+fn extract_query(args: &[String], exclude: &[&str]) -> String {
+    args.iter()
+        .map(String::as_str)
+        .filter(|s| !exclude.contains(s))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn cmd_init(args: &[String]) -> ExitCode {
@@ -1003,6 +997,28 @@ fn collect_breakdowns(
     breakdowns
 }
 
+/// Print human-readable per-component score breakdowns for a query.
+fn print_breakdowns(breakdowns: &[ScoreBreakdown], query: &str) {
+    println!("query: {}", query);
+    println!();
+    for (i, b) in breakdowns.iter().take(10).enumerate() {
+        let trophy = if i == 0 { " (best)" } else { "" };
+        println!(
+            "{}{}  total={:>4}  fuzzy={:>3}  visits={:>3}  recency={:>2}  git={:>2}  basename={:>2}  shortness={:>2}  [{:?}]",
+            b.path,
+            trophy,
+            b.total,
+            b.fuzzy,
+            b.visits,
+            b.recency,
+            b.git,
+            b.basename,
+            b.shortness,
+            b.source,
+        );
+    }
+}
+
 fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCode {
     let scorer = Scorer::new(now_secs());
     let breakdowns = collect_breakdowns(db, cfg, query, &scorer);
@@ -1032,25 +1048,7 @@ fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCod
             .collect();
         println!("{}", serde_json::to_string_pretty(&tops).unwrap());
     } else {
-        // Human-readable per-component breakdown
-        println!("query: {}", query);
-        println!();
-        for (i, b) in breakdowns.iter().take(10).enumerate() {
-            let trophy = if i == 0 { " (best)" } else { "" };
-            println!(
-                "{}{}  total={:>4}  fuzzy={:>3}  visits={:>3}  recency={:>2}  git={:>2}  basename={:>2}  shortness={:>2}  [{:?}]",
-                b.path,
-                trophy,
-                b.total,
-                b.fuzzy,
-                b.visits,
-                b.recency,
-                b.git,
-                b.basename,
-                b.shortness,
-                b.source,
-            );
-        }
+        print_breakdowns(&breakdowns, query);
     }
     ExitCode::SUCCESS
 }
@@ -1160,25 +1158,7 @@ fn cmd_explain(db: &Database, cfg: &Config, query: &str) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    // Human-readable per-component breakdown
-    println!("query: {}", query);
-    println!();
-    for (i, b) in breakdowns.iter().take(10).enumerate() {
-        let trophy = if i == 0 { " (best)" } else { "" };
-        println!(
-            "{}{}  total={:>4}  fuzzy={:>3}  visit_boost={:>3}  recency_boost={:>2}  git_bonus={:>2}  basename_bonus={:>2}  shortness={:>2}  [{:?}]",
-            b.path,
-            trophy,
-            b.total,
-            b.fuzzy,
-            b.visits,
-            b.recency,
-            b.git,
-            b.basename,
-            b.shortness,
-            b.source,
-        );
-    }
+    print_breakdowns(&breakdowns, query);
     ExitCode::SUCCESS
 }
 

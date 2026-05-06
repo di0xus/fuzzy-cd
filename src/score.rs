@@ -132,6 +132,7 @@ impl Scorer {
     /// level to avoid O(n) redundant allocations. If `None`, computed internally.
     ///
     /// Deprecated: use `score_history(row, pattern, pattern_lower, Some(0))` instead.
+    #[deprecated(since = "1.3.0", note = "use score_history with explicit fuzzy_score=Some(0)")]
     pub fn score_history_boosted(
         &self,
         row: &HistoryRow,
@@ -147,6 +148,7 @@ impl Scorer {
     /// level. If `None`, computed internally.
     ///
     /// Deprecated: use `score_history_breakdown(row, pattern, pattern_lower, Some(0))` instead.
+    #[deprecated(since = "1.3.0", note = "use score_history_breakdown with explicit fuzzy_score=Some(0)")]
     pub fn score_history_breakdown_boosted(
         &self,
         row: &HistoryRow,
@@ -299,19 +301,23 @@ pub fn classify_query(query: &str) -> (&str, bool, bool) {
 /// Regex matching uses the `regex` crate directly (linear-time NFA, no ReDoS risk).
 /// Falls back to case-insensitive substring match on timeout or for non-regex patterns.
 fn path_matches_with_regex(path: &str, regex: Option<&Regex>, pattern: &str) -> bool {
-    let path_lower = path.to_lowercase();
     if let Some(re) = regex {
+        let path_lower = path.to_lowercase();
         if re.is_match(&path_lower) {
             return true;
         }
         // Fall back to substring match
         return path_lower.contains(&pattern.to_lowercase());
     }
-    path_lower.contains(&pattern.to_lowercase())
+    // No regex — substring match without allocating a lowercased path copy upfront
+    path.to_lowercase().contains(&pattern.to_lowercase())
 }
 
 /// Pre-filter candidates based on regex or negation query modifiers.
 /// Returns the filtered list and whether any filtering was applied.
+///
+/// **Note:** This is a standalone filter used exclusively by integration tests.
+/// The main scoring path handles regex/negation inline in `score_history_batch`.
 pub fn apply_query_filter(rows: &[HistoryRow], query: &str) -> (Vec<HistoryRow>, bool) {
     let (effective, is_regex, is_negation) = classify_query(query);
     if !is_regex && !is_negation {

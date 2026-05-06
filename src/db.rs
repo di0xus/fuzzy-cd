@@ -525,28 +525,35 @@ impl Database {
         new_path: Option<&str>,
         new_description: Option<&str>,
     ) -> rusqlite::Result<usize> {
-        let mut parts: Vec<String> = Vec::new();
+        let mut set_clauses: Vec<&str> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(a) = new_alias {
-            parts.push(format!("alias = '{}'", a.replace("'", "''")));
+            set_clauses.push("alias = ?");
+            params.push(Box::new(a.to_string()));
         }
         if let Some(p) = new_path {
-            parts.push(format!("path = '{}'", p.replace("'", "''")));
+            set_clauses.push("path = ?");
+            params.push(Box::new(p.to_string()));
         }
         if let Some(d) = new_description {
-            parts.push(format!("description = '{}'", d.replace("'", "''")));
+            set_clauses.push("description = ?");
+            params.push(Box::new(d.to_string()));
         }
 
-        if parts.is_empty() {
+        if set_clauses.is_empty() {
             return Ok(0);
         }
 
+        params.push(Box::new(alias.to_string()));
+
         let sql = format!(
-            "UPDATE bookmarks SET {} WHERE alias = '{}'",
-            parts.join(", "),
-            alias.replace("'", "''")
+            "UPDATE bookmarks SET {} WHERE alias = ?",
+            set_clauses.join(", ")
         );
-        self.conn.execute(&sql, [])
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        stmt.execute(params_refs.as_slice())
     }
 
     pub fn upsert_indexed_dir(&self, path: &str) -> rusqlite::Result<()> {
@@ -605,9 +612,7 @@ impl Database {
                 idx_total   AS (SELECT COUNT(*)          AS n FROM dir_index),
                 top_row     AS (
                     SELECT path FROM history
-                    WHERE 1 = (SELECT COUNT(*) FROM history WHERE visits > history.visits)
-                    UNION ALL
-                    SELECT path FROM history WHERE 0 = (SELECT COUNT(*) FROM history)
+                    WHERE visits = (SELECT MAX(visits) FROM history)
                     LIMIT 1
                 )
             SELECT
