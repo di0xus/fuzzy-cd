@@ -79,12 +79,21 @@ fi
 say "installing to ${INSTALL_DIR}..."
 say "downloading ${latest_ver}..."
 url="${RELEASE_BASE}/v${latest_ver}/${binary_name}"
-curl -fsSL "$url" -o "$BINARY"
+
+# Retry download up to 3 times on failure
+for i in 1 2 3; do
+    if curl -fsSL "$url" -o "$BINARY"; then
+        break
+    fi
+    say "download attempt $i failed, retrying..."
+    sleep 2
+done
+
 chmod +x "$BINARY"
 
 # Verify
 if ! [ -x "$BINARY" ]; then
-    say "hop: warning: download failed or Codeberg file serving is down (HTTP 502)"
+    say "hop: warning: download failed or Codeberg file serving is down"
     say "hop: try again in a few minutes, or install from source:"
     say "  git clone https://codeberg.org/dioxus/hop && cd hop && cargo install --path ."
     exit 1
