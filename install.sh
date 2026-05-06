@@ -82,7 +82,7 @@ url="${RELEASE_BASE}/v${latest_ver}/${binary_name}"
 
 # Retry download up to 3 times on failure
 for i in 1 2 3; do
-    if curl -fsSL "$url" -o "$BINARY"; then
+    if curl -fsSL -L "$url" -o "$BINARY"; then
         break
     fi
     say "download attempt $i failed, retrying..."
