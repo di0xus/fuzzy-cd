@@ -21,9 +21,11 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact: hop-aarch64-unknown-linux-gnu
-          - os: macos-13
+          - os: macos-14
             target: x86_64-apple-darwin
             artifact: hop-x86_64-apple-darwin
+          # macOS hosts build both Apple slices natively (x86_64 cross-compiles
+          # on the arm64 runner), so no macos-13 dependency.
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: hop-aarch64-apple-darwin
