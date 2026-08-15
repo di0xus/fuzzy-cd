@@ -17,32 +17,6 @@ pub enum ImportError {
     Io(std::io::Error),
 }
 
-impl Clone for ImportError {
-    fn clone(&self) -> Self {
-        match self {
-            Self::FileTooLarge { size, max } => Self::FileTooLarge {
-                size: *size,
-                max: *max,
-            },
-            Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
-        }
-    }
-}
-
-impl PartialEq for ImportError {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::FileTooLarge { size: l, max: lm }, Self::FileTooLarge { size: r, max: rm }) => {
-                l == r && lm == rm
-            }
-            (Self::Io(l), Self::Io(r)) => l.to_string() == r.to_string(),
-            _ => false,
-        }
-    }
-}
-
-impl Eq for ImportError {}
-
 impl std::fmt::Display for ImportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -68,8 +42,6 @@ impl From<std::io::Error> for ImportError {
 }
 
 /// Check that `path` is smaller than MAX_FILE_SIZE before reading.
-/// Returns `Err(ImportError::FileTooLarge)` if the file is too big;
-/// returns `Ok(())` if reading may proceed.
 fn check_file_size(path: &Path) -> Result<(), ImportError> {
     let size = fs::metadata(path)?.len();
     if size > MAX_FILE_SIZE {
@@ -81,15 +53,11 @@ fn check_file_size(path: &Path) -> Result<(), ImportError> {
     Ok(())
 }
 
-/// Read the full contents of `path` as a `String`, but only after checking
-/// that the file is smaller than MAX_FILE_SIZE.
 fn read_to_string(path: &Path) -> Result<String, ImportError> {
     check_file_size(path)?;
     fs::read_to_string(path).map_err(ImportError::Io)
 }
 
-/// Read the full contents of `path` as raw bytes, but only after checking
-/// that the file is smaller than MAX_FILE_SIZE.
 fn read_bytes(path: &Path) -> Result<Vec<u8>, ImportError> {
     check_file_size(path)?;
     fs::read(path).map_err(ImportError::Io)
@@ -100,14 +68,15 @@ pub struct ImportStats {
     pub skipped: usize,
 }
 
-/// Parse an import file and return a preview of what would be imported,
-/// WITHOUT writing to the database. Returns list of paths that would be imported.
-pub fn import_dry_run(source: &str, path: &Path) -> Result<Vec<String>, ImportError> {
+/// Parse an import file into `(path, visits)` entries. Paths are raw (not
+/// `~`-expanded); visits are derived per source from weight/score fields.
+/// Shared by the real and dry-run import paths.
+fn parse_source(source: &str, path: &Path) -> Result<Vec<(String, i64)>, ImportError> {
     match source {
-        "fasd" => dry_run_fasd(path),
-        "autojump" => dry_run_autojump(path),
-        "zoxide" => dry_run_zoxide(path),
-        "zsh" => dry_run_zsh(path),
+        "fasd" => parse_fasd(path),
+        "autojump" => parse_autojump(path),
+        "zoxide" => parse_zoxide(path),
+        "zsh" => parse_zsh(path),
         _ => Err(ImportError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unknown source: {}", source),
@@ -115,153 +84,137 @@ pub fn import_dry_run(source: &str, path: &Path) -> Result<Vec<String>, ImportEr
     }
 }
 
-fn dry_run_fasd(path: &Path) -> Result<Vec<String>, ImportError> {
+/// fasd `.fasd` cache is tab-separated: `path\tvisits\tlast`.
+fn parse_fasd(path: &Path) -> Result<Vec<(String, i64)>, ImportError> {
     let content = read_to_string(path)?;
-    let mut result = Vec::new();
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let mut parts = line.splitn(3, '\t');
-        let raw_path = parts.next().unwrap_or("").trim();
-        if raw_path.is_empty() {
-            continue;
-        }
-        let abs = expand_home(raw_path);
-        if is_existing_dir(&abs) {
-            result.push(abs.to_string_lossy().into_owned());
-        }
-    }
-    Ok(result)
+    Ok(content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let raw_path = parts.next()?.trim();
+            if raw_path.is_empty() {
+                return None;
+            }
+            let visits = parts
+                .next()
+                .and_then(|v| v.trim().parse::<f64>().ok().map(|f| f as i64))
+                .unwrap_or(1)
+                .clamp(1, 100);
+            Some((raw_path.to_string(), visits))
+        })
+        .collect())
 }
 
-fn dry_run_autojump(path: &Path) -> Result<Vec<String>, ImportError> {
+/// autojump "~/.local/share/autojump/autojump.txt" — one line per dir:
+/// `weight\tpath`
+fn parse_autojump(path: &Path) -> Result<Vec<(String, i64)>, ImportError> {
     let content = read_to_string(path)?;
-    let mut result = Vec::new();
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let mut parts = line.splitn(2, '\t');
-        let raw_path = parts.next().unwrap_or("").trim();
-        if raw_path.is_empty() {
-            continue;
-        }
-        let abs = expand_home(raw_path);
-        if is_existing_dir(&abs) {
-            result.push(abs.to_string_lossy().into_owned());
-        }
-    }
-    Ok(result)
+    Ok(content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\t');
+            let raw_path = parts.next()?.trim();
+            if raw_path.is_empty() {
+                return None;
+            }
+            let weight: f64 = parts
+                .next()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(1.0);
+            let visits = ((weight.clamp(1.0, 100.0) / 10.0) as i64).max(1);
+            Some((raw_path.to_string(), visits))
+        })
+        .collect())
 }
 
-fn dry_run_zoxide(path: &Path) -> Result<Vec<String>, ImportError> {
+/// zoxide "~/.local/share/zoxide/db.zo" — msgpack format.
+/// Each entry is an array: [path (str), score (f64), ...]
+fn parse_zoxide(path: &Path) -> Result<Vec<(String, i64)>, ImportError> {
     use rmp_serde::Deserializer;
     use serde::Deserialize;
-
-    let data = read_bytes(path)?;
-    let mut result = Vec::new();
 
     #[derive(Debug, Deserialize)]
     #[allow(dead_code)]
     struct ZoxideEntry(String, f64);
 
+    let data = read_bytes(path)?;
     let mut deser = Deserializer::new(&data[..]);
     if let Ok(entries) = Vec::<ZoxideEntry>::deserialize(&mut deser) {
-        for entry in entries {
-            let abs = expand_home(&entry.0);
-            if is_existing_dir(&abs) {
-                result.push(abs.to_string_lossy().into_owned());
-            }
-        }
-    } else {
-        let mut deser2 = Deserializer::new(&data[..]);
-        if let Ok(paths) = Vec::<String>::deserialize(&mut deser2) {
-            for raw_path in paths {
-                let abs = expand_home(&raw_path);
-                if is_existing_dir(&abs) {
-                    result.push(abs.to_string_lossy().into_owned());
-                }
-            }
-        }
+        return Ok(entries
+            .into_iter()
+            .map(|ZoxideEntry(p, score)| {
+                let visits = ((score.clamp(1.0, 100.0) / 10.0) as i64).max(1);
+                (p, visits)
+            })
+            .collect());
     }
-    Ok(result)
+    // Fallback: simple string array
+    let mut deser2 = Deserializer::new(&data[..]);
+    Ok(Vec::<String>::deserialize(&mut deser2)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p, 1))
+        .collect())
 }
 
-fn dry_run_zsh(path: &Path) -> Result<Vec<String>, ImportError> {
+fn parse_zsh(path: &Path) -> Result<Vec<(String, i64)>, ImportError> {
     let content = read_to_string(path)?;
-    let commands = parse_zsh_history(&content);
-    let mut result = Vec::new();
-    for cmd in commands {
-        if let Some(target) = extract_cd_target(&cmd) {
-            let expanded = expand_home(&target);
-            if is_existing_dir(&expanded) {
-                result.push(expanded.to_string_lossy().into_owned());
-            }
-        }
-    }
-    Ok(result)
+    Ok(parse_zsh_history(&content)
+        .into_iter()
+        .filter_map(|cmd| extract_cd_target(&cmd).map(|t| (t, 1)))
+        .collect())
 }
 
-/// fasd `.fasd` cache is tab-separated: `path\tvisits\tlast`.
-pub fn import_fasd(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
-    let content = read_to_string(path)?;
+/// Record visits for every entry whose directory still exists.
+fn apply_import(db: &Database, entries: Vec<(String, i64)>) -> ImportStats {
     let mut stats = ImportStats {
         imported: 0,
         skipped: 0,
     };
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let mut parts = line.splitn(3, '\t');
-        let raw_path = parts.next().unwrap_or("").trim();
-        if raw_path.is_empty() {
-            stats.skipped += 1;
-            continue;
-        }
-        let visits: i32 = parts
-            .next()
-            .and_then(|v| v.trim().parse::<f64>().ok().map(|f| f as i32))
-            .unwrap_or(1)
-            .clamp(1, 100);
-        let abs = expand_home(raw_path);
+    for (raw_path, visits) in entries {
+        let abs = expand_home(&raw_path);
         if is_existing_dir(&abs) {
-            db.record_visits(&abs.to_string_lossy(), visits as i64).ok();
+            db.record_visits(&abs.to_string_lossy(), visits).ok();
             stats.imported += 1;
         } else {
             stats.skipped += 1;
         }
     }
-    Ok(stats)
+    stats
+}
+
+/// Parse an import file and return a preview of what would be imported,
+/// WITHOUT writing to the database. Returns list of paths that would be imported.
+pub fn import_dry_run(source: &str, path: &Path) -> Result<Vec<String>, ImportError> {
+    Ok(parse_source(source, path)?
+        .into_iter()
+        .filter(|(raw, _)| is_existing_dir(&expand_home(raw)))
+        .map(|(raw, _)| expand_home(&raw).to_string_lossy().into_owned())
+        .collect())
+}
+
+pub fn import_fasd(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
+    Ok(apply_import(db, parse_fasd(path)?))
+}
+
+pub fn import_autojump(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
+    Ok(apply_import(db, parse_autojump(path)?))
+}
+
+pub fn import_zoxide(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
+    Ok(apply_import(db, parse_zoxide(path)?))
+}
+
+pub fn import_zsh(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
+    Ok(apply_import(db, parse_zsh(path)?))
 }
 
 /// Parse zsh `$HISTFILE`. Supports both:
 ///   plain:    `cd ~/foo`
 ///   extended: `: 1700000000:0;cd ~/foo`
 /// Multi-line commands (trailing `\`) are concatenated.
-pub fn import_zsh(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
-    let content = read_to_string(path)?;
-    let commands = parse_zsh_history(&content);
-    let mut stats = ImportStats {
-        imported: 0,
-        skipped: 0,
-    };
-
-    for cmd in commands {
-        if let Some(target) = extract_cd_target(&cmd) {
-            let expanded = expand_home(&target);
-            if is_existing_dir(&expanded) {
-                db.record_visit(&expanded.to_string_lossy()).ok();
-                stats.imported += 1;
-            } else {
-                stats.skipped += 1;
-            }
-        }
-    }
-    Ok(stats)
-}
-
 pub fn parse_zsh_history(content: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
@@ -376,88 +329,4 @@ fn shell_tokens(s: &str) -> Vec<String> {
 
 fn is_existing_dir(p: &PathBuf) -> bool {
     fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false)
-}
-
-/// autojump "~/.local/share/autojump/autojump.txt" — one line per dir:
-/// `weight\tpath`
-pub fn import_autojump(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
-    let content = read_to_string(path)?;
-    let mut stats = ImportStats {
-        imported: 0,
-        skipped: 0,
-    };
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let mut parts = line.splitn(2, '\t');
-        let raw_path = parts.next().unwrap_or("").trim();
-        if raw_path.is_empty() {
-            stats.skipped += 1;
-            continue;
-        }
-        let weight: f64 = parts
-            .next()
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .unwrap_or(1.0);
-        let abs = expand_home(raw_path);
-        if is_existing_dir(&abs) {
-            // Record visit once per autojump weight bucket (1-100 → 1-10 visits)
-            let visits = (weight.clamp(1.0, 100.0) / 10.0) as i32;
-            db.record_visits(&abs.to_string_lossy(), visits.max(1) as i64)
-                .ok();
-            stats.imported += 1;
-        } else {
-            stats.skipped += 1;
-        }
-    }
-    Ok(stats)
-}
-
-/// zoxide "~/.local/share/zoxide/db.zo" — msgpack format.
-/// Each entry is an array: [path (str), score (f64), ...]
-pub fn import_zoxide(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
-    use rmp_serde::Deserializer;
-    use serde::Deserialize;
-
-    let data = read_bytes(path)?;
-    let mut stats = ImportStats {
-        imported: 0,
-        skipped: 0,
-    };
-
-    // Try to decode as an array of [path, score] arrays
-    #[derive(Debug, Deserialize)]
-    #[allow(dead_code)]
-    struct ZoxideEntry(String, f64);
-
-    let mut deser = Deserializer::new(&data[..]);
-    if let Ok(entries) = Vec::<ZoxideEntry>::deserialize(&mut deser) {
-        for entry in entries {
-            let abs = expand_home(&entry.0);
-            if is_existing_dir(&abs) {
-                let visits = (entry.1.clamp(1.0, 100.0) / 10.0) as i32;
-                db.record_visits(&abs.to_string_lossy(), visits.max(1) as i64)
-                    .ok();
-                stats.imported += 1;
-            } else {
-                stats.skipped += 1;
-            }
-        }
-    } else {
-        // Fallback: simple string array
-        let mut deser2 = Deserializer::new(&data[..]);
-        if let Ok(paths) = Vec::<String>::deserialize(&mut deser2) {
-            for raw_path in paths {
-                let abs = expand_home(&raw_path);
-                if is_existing_dir(&abs) {
-                    db.record_visit(&abs.to_string_lossy()).ok();
-                    stats.imported += 1;
-                } else {
-                    stats.skipped += 1;
-                }
-            }
-        }
-    }
-    Ok(stats)
 }

@@ -65,7 +65,13 @@ impl Scorer {
     /// Shared component computation for history scoring. `fuzzy` and
     /// `basename_bonus` differ per query type (single token, multi token,
     /// regex/negation); the recency/visit/git/session terms are the same.
-    fn score_parts(&self, row: &HistoryRow, fuzzy: i64, basename_bonus: bool, indices: Vec<usize>) -> Scored {
+    fn score_parts(
+        &self,
+        row: &HistoryRow,
+        fuzzy: i64,
+        basename_bonus: bool,
+        indices: Vec<usize>,
+    ) -> Scored {
         let age_days = (self.now - row.last_visited) / 86_400.0;
         let recency_f = if age_days < 1.0 {
             3.0
@@ -244,40 +250,6 @@ fn path_matches_with_regex(path: &str, regex: Option<&Regex>, pattern: &str) -> 
         return path_lower.contains(&pattern.to_lowercase());
     }
     path_lower.contains(&pattern.to_lowercase())
-}
-
-/// Pre-filter candidates based on regex or negation query modifiers.
-/// Returns the filtered list and whether any filtering was applied.
-pub fn apply_query_filter(rows: &[HistoryRow], query: &str) -> (Vec<HistoryRow>, bool) {
-    let (effective, is_regex, is_negation) = classify_query(query);
-    if !is_regex && !is_negation {
-        return (rows.to_vec(), false);
-    }
-    if effective.is_empty() {
-        return (rows.to_vec(), false);
-    }
-
-    // Compile the regex ONCE, not per-row
-    let compiled_regex = if is_regex {
-        Regex::new(effective).ok()
-    } else {
-        None
-    };
-
-    let filtered: Vec<HistoryRow> = rows
-        .iter()
-        .filter(|row| {
-            let matches = path_matches_with_regex(&row.path, compiled_regex.as_ref(), effective);
-            if is_negation {
-                !matches
-            } else {
-                matches
-            }
-        })
-        .cloned()
-        .collect();
-
-    (filtered, true)
 }
 
 /// Score a list of history rows with optional regex/negation filtering.

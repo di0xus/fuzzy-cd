@@ -484,14 +484,13 @@ fn auto_prune_on_startup_runs_silently_when_enabled() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Unit-test stubs for score module regex / negation support.
-// These use the internal apply_query_filter API directly.
+// score_history_batch regex / negation support.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn apply_query_filter_regex_matches_foo_digit() {
+fn regex_query_matches_foo_digit() {
     use hop::db::HistoryRow;
-    use hop::score::apply_query_filter;
+    use hop::score::{score_history_batch, Scorer};
 
     let rows = vec![
         HistoryRow {
@@ -514,9 +513,9 @@ fn apply_query_filter_regex_matches_foo_digit() {
         },
     ];
 
-    let (filtered, applied) = apply_query_filter(&rows, "/foo\\d+");
+    let (scored, applied) = score_history_batch(&Scorer::new(1_000_000.0), &rows, "/foo\\d+");
     assert!(applied, "regex filter should be detected as applied");
-    let paths: Vec<_> = filtered.iter().map(|r| r.path.as_str()).collect();
+    let paths: Vec<_> = scored.iter().map(|s| s.path.as_str()).collect();
     assert!(
         paths.contains(&"/home/user/foo1/bar") && paths.contains(&"/home/user/foo22/baz"),
         "regex should match foo1 and foo22, got: {:?}",
@@ -530,9 +529,9 @@ fn apply_query_filter_regex_matches_foo_digit() {
 }
 
 #[test]
-fn apply_query_filter_negation_excludes_node_modules() {
+fn negation_query_excludes_node_modules() {
     use hop::db::HistoryRow;
-    use hop::score::apply_query_filter;
+    use hop::score::{score_history_batch, Scorer};
 
     let rows = vec![
         HistoryRow {
@@ -549,9 +548,9 @@ fn apply_query_filter_negation_excludes_node_modules() {
         },
     ];
 
-    let (filtered, applied) = apply_query_filter(&rows, "!node");
+    let (scored, applied) = score_history_batch(&Scorer::new(1_000_000.0), &rows, "!node");
     assert!(applied, "negation filter should be detected as applied");
-    let paths: Vec<_> = filtered.iter().map(|r| r.path.as_str()).collect();
+    let paths: Vec<_> = scored.iter().map(|s| s.path.as_str()).collect();
     assert!(
         paths.contains(&"/home/user/project/src"),
         "negation !node should include /project/src, got: {:?}",

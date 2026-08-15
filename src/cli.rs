@@ -9,7 +9,6 @@ use crate::init;
 use crate::picker;
 use crate::score::{Scored, Scorer};
 use crate::{doctor, import};
-use serde_json;
 
 pub const HELP: &str = r#"hop — smart directory jump
 
@@ -283,31 +282,21 @@ pub fn run(args: Vec<String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         "import" => {
-            // Check for --dry-run flag (can appear before or after source)
-            let dry_run = args[2..].iter().any(|a| a == "--dry-run");
-            let source;
-            let file;
-
-            if args.len() >= 5 && args[2] == "--dry-run" {
-                // hop import --dry-run <source> <file>
-                source = args[3].as_str();
-                file = Path::new(&args[4]);
-            } else if args.len() >= 5 && args[3] == "--dry-run" {
-                // hop import <source> --dry-run <file>
-                source = args[2].as_str();
-                file = Path::new(&args[4]);
-            } else if args.len() == 4 && args[2] == "--dry-run" {
-                // hop import --dry-run <source> — file is missing
+            // --dry-run may appear before or after the source/file args.
+            let rest: Vec<&str> = args[2..].iter().map(String::as_str).collect();
+            let dry_run = rest.contains(&"--dry-run");
+            let positional: Vec<&str> = rest.into_iter().filter(|a| *a != "--dry-run").collect();
+            let usage = || {
                 eprintln!("Usage: hop import [--dry-run] <fasd|autojump|zoxide|zsh> <file>");
-                return ExitCode::from(2);
-            } else if args.len() >= 4 {
-                source = args[2].as_str();
-                file = Path::new(&args[3]);
-            } else {
-                eprintln!("Usage: hop import [--dry-run] <fasd|autojump|zoxide|zsh> <file>");
-                return ExitCode::from(2);
+                ExitCode::from(2)
             };
-
+            let Some((&source, rest)) = positional.split_first() else {
+                return usage();
+            };
+            let Some(&file) = rest.first() else {
+                return usage();
+            };
+            let file = Path::new(file);
             if dry_run {
                 match import::import_dry_run(source, file) {
                     Ok(preview) => {
@@ -695,8 +684,7 @@ fn cmd_bookmark(db: &Database, args: &[String], is_json: bool) -> ExitCode {
             // No flags: print current values
             match db.bookmarks() {
                 Ok(bms) => {
-                    if let Some((_a, _p, _d)) = bms.iter().find(|(a, _, _)| a == alias) {
-                        let (a, p, d) = bms.iter().find(|(a, _, _)| *a == *alias).unwrap();
+                    if let Some((a, p, d)) = bms.iter().find(|(a, _, _)| *a == *alias) {
                         println!("alias:       {}", a);
                         println!("path:        {}", p);
                         println!("description: {}", d);
@@ -1238,11 +1226,7 @@ mod tests {
         let best = find_best(&db, &cfg, "my project");
         assert_eq!(
             best.as_deref(),
-            Some(
-                canonicalize_path(proj.to_str().unwrap())
-                    .unwrap()
-                    .as_str()
-            )
+            Some(canonicalize_path(proj.to_str().unwrap()).unwrap().as_str())
         );
     }
 
@@ -1287,7 +1271,11 @@ mod tests {
         }
         assert_eq!(
             up.as_deref(),
-            Some(canonicalize_path(tmp.path().to_str().unwrap()).unwrap().as_str())
+            Some(
+                canonicalize_path(tmp.path().to_str().unwrap())
+                    .unwrap()
+                    .as_str()
+            )
         );
     }
 }

@@ -267,12 +267,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn prune_stale(&self) -> rusqlite::Result<usize> {
-        self.prune_stale_batch(256, |_, _| {})
-    }
-
-    /// Remove stale history entries, processing in batches of `batch_size`.
-    /// Calls `progress` with (processed, total) after each batch.
     pub fn prune_stale_batch<F>(&self, batch_size: usize, progress: F) -> rusqlite::Result<usize>
     where
         F: Fn(usize, usize),
@@ -371,57 +365,42 @@ impl Database {
         Ok(removed)
     }
 
+    const HISTORY_COLS: &str = "SELECT path, visits, last_visited, is_git_repo FROM history";
+
+    fn map_row(r: &rusqlite::Row) -> rusqlite::Result<HistoryRow> {
+        Ok(HistoryRow {
+            path: r.get(0)?,
+            visits: r.get(1)?,
+            last_visited: r.get(2)?,
+            is_git_repo: r.get::<_, i64>(3)? != 0,
+        })
+    }
+
     pub fn history_rows(&self) -> rusqlite::Result<Vec<HistoryRow>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path, visits, last_visited, is_git_repo FROM history")?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(HistoryRow {
-                    path: r.get(0)?,
-                    visits: r.get(1)?,
-                    last_visited: r.get(2)?,
-                    is_git_repo: r.get::<_, i64>(3)? != 0,
-                })
-            })?
-            .flatten()
-            .collect();
+        let mut stmt = self.conn.prepare(Self::HISTORY_COLS)?;
+        let rows = stmt.query_map([], Self::map_row)?.flatten().collect();
         Ok(rows)
     }
 
     pub fn top(&self, limit: usize) -> rusqlite::Result<Vec<HistoryRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT path, visits, last_visited, is_git_repo FROM history
-             ORDER BY visits DESC, last_visited DESC LIMIT ?1",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "{} ORDER BY visits DESC, last_visited DESC LIMIT ?1",
+            Self::HISTORY_COLS
+        ))?;
         let rows = stmt
-            .query_map(params![limit as i64], |r| {
-                Ok(HistoryRow {
-                    path: r.get(0)?,
-                    visits: r.get(1)?,
-                    last_visited: r.get(2)?,
-                    is_git_repo: r.get::<_, i64>(3)? != 0,
-                })
-            })?
+            .query_map(params![limit as i64], Self::map_row)?
             .flatten()
             .collect();
         Ok(rows)
     }
 
     pub fn recent(&self, limit: usize) -> rusqlite::Result<Vec<HistoryRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT path, visits, last_visited, is_git_repo FROM history
-             ORDER BY last_visited DESC LIMIT ?1",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "{} ORDER BY last_visited DESC LIMIT ?1",
+            Self::HISTORY_COLS
+        ))?;
         let rows = stmt
-            .query_map(params![limit as i64], |r| {
-                Ok(HistoryRow {
-                    path: r.get(0)?,
-                    visits: r.get(1)?,
-                    last_visited: r.get(2)?,
-                    is_git_repo: r.get::<_, i64>(3)? != 0,
-                })
-            })?
+            .query_map(params![limit as i64], Self::map_row)?
             .flatten()
             .collect();
         Ok(rows)

@@ -78,7 +78,9 @@ pub fn run(db: &Database) -> Report {
                 symlink_dupes.len() - 5
             ));
         }
-        lines.push("  → duplicates merge as paths are revisited (hop stores canonical paths)".to_string());
+        lines.push(
+            "  → duplicates merge as paths are revisited (hop stores canonical paths)".to_string(),
+        );
     }
 
     // Data directory permissions
@@ -110,7 +112,7 @@ pub fn run(db: &Database) -> Report {
         ));
     }
 
-    match detect_shell_hook() {
+    match crate::init::detect_shell() {
         Some(shell) => lines.push(format!("✓ detected shell: {}", shell)),
         None => {
             ok = false;
@@ -121,19 +123,6 @@ pub fn run(db: &Database) -> Report {
     }
 
     Report { ok, lines }
-}
-
-fn detect_shell_hook() -> Option<&'static str> {
-    let shell = std::env::var("SHELL").ok()?;
-    if shell.ends_with("zsh") {
-        Some("zsh")
-    } else if shell.ends_with("bash") {
-        Some("bash")
-    } else if shell.ends_with("fish") {
-        Some("fish")
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]

@@ -209,19 +209,23 @@ fn compute_items(
                 .cloned()
                 .collect();
             let live_set: std::collections::HashSet<_> = live.iter().collect();
-            candidates.extend(rows.iter().filter(|r| live_set.contains(&r.path)).map(|r| Scored {
-                path: r.path.clone(),
-                score: r.last_visited as i64,
-                fuzzy: 0,
-                visits: 0,
-                recency: 0,
-                git: 0,
-                basename: 0,
-                shortness: 0,
-                session: 0,
-                source: Source::History,
-                matched_indices: vec![],
-            }));
+            candidates.extend(
+                rows.iter()
+                    .filter(|r| live_set.contains(&r.path))
+                    .map(|r| Scored {
+                        path: r.path.clone(),
+                        score: r.last_visited as i64,
+                        fuzzy: 0,
+                        visits: 0,
+                        recency: 0,
+                        git: 0,
+                        basename: 0,
+                        shortness: 0,
+                        session: 0,
+                        source: Source::History,
+                        matched_indices: vec![],
+                    }),
+            );
         }
     } else {
         if let Ok(bms) = db.bookmarks() {
@@ -272,28 +276,18 @@ fn render<W: Write>(
     out.queue(cursor::MoveTo(0, 0))?
         .queue(Clear(ClearType::All))?;
 
-    if filter_buf.is_some() {
-        // Show query in top bar, filter input at bottom
-        if !nc {
-            out.queue(SetForegroundColor(Color::Cyan))?;
-        }
-        out.queue(Print("› "))?;
-        if !nc {
-            out.queue(ResetColor)?;
-        }
-        out.queue(Print(query))?;
-        out.queue(Print(" (filter mode)\r\n"))?;
-    } else {
-        if !nc {
-            out.queue(SetForegroundColor(Color::Cyan))?;
-        }
-        out.queue(Print("› "))?;
-        if !nc {
-            out.queue(ResetColor)?;
-        }
-        out.queue(Print(query))?;
-        out.queue(Print("\r\n"))?;
+    if !nc {
+        out.queue(SetForegroundColor(Color::Cyan))?;
     }
+    out.queue(Print("› "))?;
+    if !nc {
+        out.queue(ResetColor)?;
+    }
+    out.queue(Print(query))?;
+    if filter_buf.is_some() {
+        out.queue(Print(" (filter mode)"))?;
+    }
+    out.queue(Print("\r\n"))?;
 
     if items.is_empty() {
         if !nc {
@@ -465,7 +459,11 @@ mod tests {
         assert!(r.is_ok(), "render should not fail");
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("/tmp/"), "items should be drawn, got: {}", s);
-        assert!(s.contains("ome-project"), "path should be drawn, got: {}", s);
+        assert!(
+            s.contains("ome-project"),
+            "path should be drawn, got: {}",
+            s
+        );
     }
 
     #[test]
