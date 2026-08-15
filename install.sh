@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # hop install.sh — curl-based installation / upgrade
-# Usage: curl -fsSL https://codeberg.org/dioxus/hop/raw/branch/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/doriangironde/hop/main/install.sh | bash
 set -e
 
-REPO="dioxus/hop"
+REPO="doriangironde/hop"
 INSTALL_DIR="${HOP_INSTALL_DIR:-$HOME/.local/bin}"
 BINARY="$INSTALL_DIR/hop"
-RELEASE_BASE="https://codeberg.org/${REPO}/releases/download"
-API_URL="https://codeberg.org/api/v1/repos/${REPO}/releases/latest"
+RELEASE_BASE="https://github.com/${REPO}/releases/download"
+API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 
 detect_os() {
     case "$(uname -s)" in
@@ -28,8 +28,12 @@ detect_arch() {
 say() { echo "hop: $1"; }
 
 latest_version() {
-    # Fetch tag_name from Codeberg API, strip leading 'v'
-    curl -fsSL "$API_URL" | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))"
+    # Fetch tag_name from the GitHub API, strip leading 'v'
+    curl -fsSL -H "Accept: application/vnd.github+json" \
+        -H "User-Agent: hop-install" \
+        "$API_URL" 2>/dev/null \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))" 2>/dev/null \
+        || true
 }
 
 local_version() {
@@ -51,7 +55,7 @@ if [ -x "$BINARY" ]; then
     latest_ver=$(latest_version)
 
     if [ -z "$latest_ver" ]; then
-        say "warning: could not determine latest version — checking Codeberg directly"
+        say "warning: could not determine latest version for ${REPO}"
     elif [ "$local_ver" = "$latest_ver" ]; then
         say "already on latest version ($latest_ver)"
         exit 0
@@ -68,6 +72,12 @@ else
     latest_ver=$(latest_version)
 fi
 
+if [ -z "$latest_ver" ]; then
+    say "no releases found for ${REPO} yet — install from source:"
+    say "  git clone https://github.com/doriangironde/hop && cd hop && cargo install --path ."
+    exit 1
+fi
+
 say "installing to ${INSTALL_DIR}..."
 say "downloading ${latest_ver}..."
 url="${RELEASE_BASE}/v${latest_ver}/${binary_name}"
@@ -76,9 +86,9 @@ chmod +x "$BINARY"
 
 # Verify
 if ! [ -x "$BINARY" ]; then
-    say "hop: warning: download failed or Codeberg file serving is down (HTTP 502)"
+    say "hop: warning: download failed or GitHub file serving is down"
     say "hop: try again in a few minutes, or install from source:"
-    say "  git clone https://codeberg.org/dioxus/hop && cd hop && cargo install --path ."
+    say "  git clone https://github.com/doriangironde/hop && cd hop && cargo install --path ."
     exit 1
 fi
 

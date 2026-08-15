@@ -17,7 +17,7 @@ No more `cd ../../../long/path`. No more memorizing aliases.
 ## Install
 
 ```bash
-curl -fsSL https://codeberg.org/dioxus/hop/raw/branch/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/doriangironde/hop/main/install.sh | bash
 ```
 
 Then add shell integration:
@@ -80,13 +80,13 @@ Queries support fzf-style modifiers: `/regex/` matches a pattern, `!pattern` exc
 
 All the details are in the wiki:
 
-- [Installation](https://codeberg.org/dioxus/hop.wiki/wiki/Installation) — one-liner, from source, uninstall
-- [Shell Setup](https://codeberg.org/dioxus/hop.wiki/wiki/Shell-Setup) — bash, zsh, fish
-- [Usage](https://codeberg.org/dioxus/hop.wiki/wiki/Usage) — all commands with examples
-- [Configuration](https://codeberg.org/dioxus/hop.wiki/wiki/Configuration) — config.toml reference
-- [Importing](https://codeberg.org/dioxus/hop.wiki/wiki/Importing) — migrate from zsh/fasd/autojump/zoxide
-- [Troubleshooting](https://codeberg.org/dioxus/hop.wiki/wiki/Troubleshooting) — common issues and fixes
-- [Changelog](https://codeberg.org/dioxus/hop.wiki/wiki/Changelog) — release notes
+- [Installation](https://github.com/doriangironde/hop/wiki/Installation) — one-liner, from source, uninstall
+- [Shell Setup](https://github.com/doriangironde/hop/wiki/Shell-Setup) — bash, zsh, fish
+- [Usage](https://github.com/doriangironde/hop/wiki/Usage) — all commands with examples
+- [Configuration](https://github.com/doriangironde/hop/wiki/Configuration) — config.toml reference
+- [Importing](https://github.com/doriangironde/hop/wiki/Importing) — migrate from zsh/fasd/autojump/zoxide
+- [Troubleshooting](https://github.com/doriangironde/hop/wiki/Troubleshooting) — common issues and fixes
+- [Changelog](https://github.com/doriangironde/hop/wiki/Changelog) — release notes
 
 ## Verify
 
