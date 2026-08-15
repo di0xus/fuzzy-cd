@@ -36,14 +36,6 @@ local_version() {
     "$BINARY" --version 2>/dev/null | cut -d' ' -f2
 }
 
-need_update() {
-    local latest="$1"
-    local local="$2"
-    # Simple semver comparison: always update if different major.minor
-    # (this handles 0.6.0 -> 0.6.1 gracefully)
-    [ "$latest" != "$local" ]
-}
-
 # Map to target triple used in release assets
 case "$(detect_os)-$(detect_arch)" in
     linux-x86_64)   target="x86_64-unknown-linux-gnu" ;;

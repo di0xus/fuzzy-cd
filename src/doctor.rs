@@ -20,8 +20,8 @@ pub fn run(db: &Database) -> Report {
         }
     };
     lines.push(format!(
-        "✓ db ok — {} paths / {} visits / {} bookmarks / {} indexed",
-        counts.total, counts.total_visits, counts.bookmarks, counts.indexed,
+        "✓ db ok — {} paths / {} visits / {} bookmarks",
+        counts.total, counts.total_visits, counts.bookmarks,
     ));
 
     // Schema version mismatch
@@ -78,7 +78,7 @@ pub fn run(db: &Database) -> Report {
                 symlink_dupes.len() - 5
             ));
         }
-        lines.push("  → run `hop prune` to deduplicate".to_string());
+        lines.push("  → duplicates merge as paths are revisited (hop stores canonical paths)".to_string());
     }
 
     // Data directory permissions

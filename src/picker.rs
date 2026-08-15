@@ -1,6 +1,5 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crossterm::{
@@ -30,18 +29,6 @@ pub fn visible_rows() -> usize {
             target.clamp(4, 20)
         })
         .unwrap_or(10)
-}
-
-/// Returns the current terminal width, or 80 as default.
-pub fn terminal_cols() -> usize {
-    terminal::size()
-        .map(|(cols, _)| cols as usize)
-        .unwrap_or(80)
-}
-
-/// Preview pane is shown when terminal width > 120.
-pub fn should_show_preview() -> bool {
-    terminal_cols() > 120
 }
 
 pub struct PickerItem {
@@ -88,8 +75,6 @@ fn run_loop<W: Write>(
     let (initial_items, last_computed_query) = compute_items(db, &query, None);
     let mut items = initial_items;
     let mut last_computed_query = last_computed_query;
-    let preview = should_show_preview();
-
     // Filter mode: when true, typing goes to an explicit filter input at bottom
     let mut filter_mode = false;
     let mut filter_buf = String::new();
@@ -100,9 +85,7 @@ fn run_loop<W: Write>(
             &query,
             &items,
             cursor_idx,
-            preview,
-            filter_mode,
-            &filter_buf,
+            filter_mode.then_some(filter_buf.as_str()),
         )?;
 
         if !event::poll(Duration::from_millis(500))? {
@@ -229,6 +212,13 @@ fn compute_items(
             candidates.extend(rows.iter().filter(|r| live_set.contains(&r.path)).map(|r| Scored {
                 path: r.path.clone(),
                 score: r.last_visited as i64,
+                fuzzy: 0,
+                visits: 0,
+                recency: 0,
+                git: 0,
+                basename: 0,
+                shortness: 0,
+                session: 0,
                 source: Source::History,
                 matched_indices: vec![],
             }));
@@ -242,24 +232,22 @@ fn compute_items(
             }
         }
         if let Ok(rows) = db.history_rows() {
-            // Score all candidates first, then parallel-filter by is_dir
             let scored: Vec<_> = rows
                 .iter()
-                .filter_map(|r| scorer.score_history(r, query, None, None))
+                .filter_map(|r| scorer.score_row(r, query))
                 .collect();
-            let paths: Vec<_> = scored.iter().map(|s| s.path.clone()).collect();
-            let live: Vec<_> = paths
-                .par_iter()
-                .filter(|p| Path::new(p).is_dir())
-                .cloned()
-                .collect();
-            let live_set: std::collections::HashSet<_> = live.into_iter().collect();
-            candidates.extend(scored.into_iter().filter(|s| live_set.contains(&s.path)));
+            candidates.extend(scored);
         }
     }
 
     candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
     candidates.dedup_by(|a, b| a.path == b.path);
+    if !query.is_empty() {
+        // Per-keystroke stat budget: only the top candidates can be shown, so
+        // live-check just those instead of one stat() per history row.
+        candidates.truncate(vr.max(4) * 2);
+        candidates.retain(|c| Path::new(&c.path).is_dir());
+    }
     let items: Vec<PickerItem> = candidates
         .into_iter()
         .take(vr.max(4))
@@ -272,32 +260,19 @@ fn compute_items(
     (items, query.to_string())
 }
 
-/// Returns the picker subprocess timeout from HOP_PICKER_TIMEOUT env var, default 5s.
-fn picker_timeout() -> Duration {
-    std::env::var("HOP_PICKER_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(5))
-}
-
 fn render<W: Write>(
     out: &mut W,
     query: &str,
     items: &[PickerItem],
     cursor_idx: usize,
-    preview: bool,
-    filter_mode: bool,
-    filter_buf: &str,
+    filter_buf: Option<&str>,
 ) -> io::Result<()> {
     let nc = no_color();
-    let (cols, rows) = terminal::size().unwrap_or((80, 24));
-    let timeout = picker_timeout();
 
     out.queue(cursor::MoveTo(0, 0))?
         .queue(Clear(ClearType::All))?;
 
-    if filter_mode {
+    if filter_buf.is_some() {
         // Show query in top bar, filter input at bottom
         if !nc {
             out.queue(SetForegroundColor(Color::Cyan))?;
@@ -330,12 +305,6 @@ fn render<W: Write>(
         }
     }
 
-    let _preview_cols = if preview {
-        (cols / 2).saturating_sub(1)
-    } else {
-        0
-    };
-
     for (i, item) in items.iter().enumerate() {
         let selected = i == cursor_idx;
         if selected && !nc {
@@ -344,7 +313,6 @@ fn render<W: Write>(
         let tag = match item.source {
             Source::Bookmark => "★",
             Source::History => " ",
-            Source::Index => "·",
         };
         if !nc {
             out.queue(SetForegroundColor(Color::DarkGrey))?;
@@ -360,50 +328,13 @@ fn render<W: Write>(
         if selected && !nc {
             out.queue(SetAttribute(Attribute::Reset))?;
         }
-        if preview && selected {
-            // Right pane: ls output
-            out.queue(Print("  "))?;
-            let color_arg = if nc {
-                "--color=never"
-            } else {
-                "--color=always"
-            };
-            let mut cmd = Command::new("ls");
-            cmd.arg("-la")
-                .arg(color_arg)
-                .arg("--")
-                .arg(&item.path)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            if let Ok(mut child) = cmd.spawn() {
-                let handle = std::thread::spawn(move || {
-                    let mut buf = Vec::new();
-                    if let Some(ref mut stdout) = child.stdout {
-                        let _ = stdout.read_to_end(&mut buf);
-                    }
-                    match child.wait() {
-                        Ok(exit) if exit.success() => Some(buf),
-                        _ => None,
-                    }
-                });
-                std::thread::sleep(timeout);
-                let output = handle.join().ok().flatten();
-                if let Some(bytes) = output {
-                    let ls_out = String::from_utf8_lossy(&bytes);
-                    for line in ls_out.lines().take((rows as usize).saturating_sub(6)) {
-                        out.queue(Print(line))?;
-                        out.queue(Print("\r\n"))?;
-                    }
-                }
-            }
-        }
         out.queue(Print("\r\n"))?;
     }
 
     if !nc {
         out.queue(SetForegroundColor(Color::DarkGrey))?;
     }
-    if filter_mode {
+    if let Some(filter_buf) = filter_buf {
         // Show filter input at bottom
         out.queue(Print("\r\nfilter: "))?;
         out.queue(Print(filter_buf))?;
@@ -412,9 +343,6 @@ fn render<W: Write>(
         out.queue(Print(
             "\r\n  enter select · esc cancel · / filter · ↑↓ move",
         ))?;
-        if preview {
-            out.queue(Print(" · preview (w>120)"))?;
-        }
     }
     if !nc {
         out.queue(ResetColor)?;
@@ -523,6 +451,21 @@ mod tests {
         // No entries recorded — should not panic
         let (items, _) = compute_items(&db, "", None);
         assert!(items.is_empty(), "empty DB should yield no items");
+    }
+
+    #[test]
+    fn render_does_not_panic() {
+        let mut buf = Vec::new();
+        let items = vec![PickerItem {
+            path: "/tmp/some-project".into(),
+            source: Source::History,
+            matched_indices: vec![5],
+        }];
+        let r = render(&mut buf, "proj", &items, 0, None);
+        assert!(r.is_ok(), "render should not fail");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("/tmp/"), "items should be drawn, got: {}", s);
+        assert!(s.contains("ome-project"), "path should be drawn, got: {}", s);
     }
 
     #[test]

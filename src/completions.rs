@@ -8,8 +8,6 @@ pub fn script_for(shell: &str) -> Option<&'static str> {
         "bash" => Some(BASH),
         "zsh" => Some(ZSH),
         "fish" => Some(FISH),
-        "nushell" | "nu" => Some(NUSHELL),
-        "elvish" => Some(ELVISH),
         _ => None,
     }
 }
@@ -19,8 +17,8 @@ _hop() {
     local cur prev words cword
     _init_completion || return
 
-    local subcommands="p pick add rm forget zap book bookmark history recent top score list export import prune clear stats reindex doctor explain update init completions help"
-    local shells="bash zsh fish nushell nu elvish"
+    local subcommands="p pick add rm forget book history recent score list export import prune clear stats doctor init completions help"
+    local shells="bash zsh fish"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "$subcommands --help -h" -- "$cur") )
@@ -35,7 +33,7 @@ _hop() {
             ;;
         import)
             if [[ $cword -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "fasd zsh autojump zoxide thefuck --dry-run" -- "$cur") )
+                COMPREPLY=( $(compgen -W "fasd zsh autojump zoxide --dry-run" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -f -- "$cur") )
             fi
@@ -80,11 +78,6 @@ _hop() {
                 COMPREPLY=( $(compgen -W "json csv tsv" -- "$cur") )
             fi
             ;;
-        update)
-            if [[ "$cur" == --* ]]; then
-                COMPREPLY=( $(compgen -W "--dry-run" -- "$cur") )
-            fi
-            ;;
         prune)
             COMPREPLY=( $(compgen -W "--dry-run --quiet" -- "$cur") )
             ;;
@@ -98,9 +91,6 @@ _hop() {
             if [[ "$cur" != -* ]]; then
                 COMPREPLY=( $(compgen -W "20 10 50 100" -- "$cur") )
             fi
-            ;;
-        explain)
-            COMPREPLY=( $(compgen -f -- "$cur") )
             ;;
     esac
 }
@@ -118,28 +108,22 @@ _hop() {
         'add:record a visit (use --dry-run to preview)'
         'rm:remove path from history'
         'forget:fuzzy-find and remove'
-        'zap:alias of forget'
         'book:manage bookmarks'
-        'bookmark:manage bookmarks'
         'history:top by visits (default 20, use 10/50/100)'
         'recent:last visited (default 20)'
-        'top:top 10'
         'score:show per-component score breakdown'
         'list:list all scored matches'
         'export:dump history/bookmarks in json/csv/tsv format'
-        'import:import from fasd/zsh/autojump/zoxide/thefuck'
+        'import:import from fasd/zsh/autojump/zoxide'
         'prune:remove stale paths'
         'clear:wipe history'
         'stats:DB stats'
-        'reindex:rebuild filesystem index'
         'doctor:diagnose setup'
-        'explain:show score breakdown for query'
-        'update:self-update to latest release'
         'init:emit shell integration'
         'completions:emit completion script'
         'help:show help'
     )
-    shells=(bash zsh fish nushell nu elvish)
+    shells=(bash zsh fish)
 
     _arguments -C \
         '1: :->cmd' \
@@ -153,18 +137,18 @@ _hop() {
             case $words[1] in
                 init)
                     _arguments \
-                        '1:shell:_values "shell" bash zsh fish nushell nu elvish' \
+                        '1:shell:_values "shell" bash zsh fish' \
                         '--shell[specify shell explicitly]' \
                         '--verify[check shell integration]'
                     ;;
                 completions)
                     _arguments \
-                        '1:shell:_values "shell" bash zsh fish nushell nu elvish' \
+                        '1:shell:_values "shell" bash zsh fish' \
                         '--shell[specify shell explicitly]'
                     ;;
                 import)
                     if (( CURRENT == 2 )); then
-                        _values 'source' fasd zsh autojump zoxide thefuck
+                        _values 'source' fasd zsh autojump zoxide
                     elif (( CURRENT == 3 )); then
                         _values 'flag' --dry-run
                     else
@@ -208,10 +192,6 @@ _hop() {
                         '--format[specify format]:format:_values "format" json csv tsv' \
                         '1: :'
                     ;;
-                update)
-                    _arguments \
-                        '--dry-run[preview what would be installed]'
-                    ;;
                 prune)
                     _values 'flag' --dry-run --quiet
                     ;;
@@ -223,9 +203,6 @@ _hop() {
                     ;;
                 history|recent)
                     _arguments '1:limit:_values "limit" 10 20 50 100'
-                    ;;
-                explain)
-                    _arguments '1:query: '
                     ;;
             esac
             ;;
@@ -257,37 +234,31 @@ complete -c hop -n __hop_needs_command -a pick        -d 'pick best match'
 complete -c hop -n __hop_needs_command -a add          -d 'record a visit'
 complete -c hop -n __hop_needs_command -a rm          -d 'remove path from history'
 complete -c hop -n __hop_needs_command -a forget      -d 'fuzzy-find and remove'
-complete -c hop -n __hop_needs_command -a zap         -d 'alias of forget'
 complete -c hop -n __hop_needs_command -a book        -d 'manage bookmarks'
-complete -c hop -n __hop_needs_command -a bookmark    -d 'manage bookmarks'
 complete -c hop -n __hop_needs_command -a history     -d 'top by visits (default 20)'
 complete -c hop -n __hop_needs_command -a recent      -d 'last visited (default 20)'
-complete -c hop -n __hop_needs_command -a top         -d 'top 10'
 complete -c hop -n __hop_needs_command -a score        -d 'show per-component score breakdown'
 complete -c hop -n __hop_needs_command -a list        -d 'list all scored matches'
 complete -c hop -n __hop_needs_command -a export      -d 'dump history/bookmarks in json/csv/tsv'
-complete -c hop -n __hop_needs_command -a import      -d 'import from fasd/zsh/autojump/zoxide/thefuck'
+complete -c hop -n __hop_needs_command -a import      -d 'import from fasd/zsh/autojump/zoxide'
 complete -c hop -n __hop_needs_command -a prune       -d 'remove stale paths'
 complete -c hop -n __hop_needs_command -a clear       -d 'wipe history'
 complete -c hop -n __hop_needs_command -a stats       -d 'DB stats'
-complete -c hop -n __hop_needs_command -a reindex     -d 'rebuild filesystem index'
 complete -c hop -n __hop_needs_command -a doctor       -d 'diagnose setup'
-complete -c hop -n __hop_needs_command -a explain      -d 'show score breakdown for query'
-complete -c hop -n __hop_needs_command -a update      -d 'self-update to latest release'
 complete -c hop -n __hop_needs_command -a init        -d 'emit shell integration'
 complete -c hop -n __hop_needs_command -a completions  -d 'emit completion script'
 complete -c hop -n __hop_needs_command -a help         -d 'show help'
 complete -c hop -n __hop_needs_command -l help         -d 'show help'
 
 # init / completions → shell with flags
-complete -c hop -n '__hop_using_command init'        -a 'bash zsh fish nushell nu elvish' -d 'shell name'
+complete -c hop -n '__hop_using_command init'        -a 'bash zsh fish' -d 'shell name'
 complete -c hop -n '__hop_using_command init'        -l shell          -d 'specify shell explicitly'
 complete -c hop -n '__hop_using_command init'        -l verify         -d 'check shell integration'
-complete -c hop -n '__hop_using_command completions' -a 'bash zsh fish nushell nu elvish' -d 'shell name'
+complete -c hop -n '__hop_using_command completions' -a 'bash zsh fish' -d 'shell name'
 complete -c hop -n '__hop_using_command completions' -l shell          -d 'specify shell explicitly'
 
 # import source with --dry-run
-complete -c hop -n '__hop_using_command import' -a 'fasd zsh autojump zoxide thefuck' -d 'import source'
+complete -c hop -n '__hop_using_command import' -a 'fasd zsh autojump zoxide' -d 'import source'
 complete -c hop -n '__hop_using_command import' -l dry-run -d 'preview import without writing'
 
 # book subcommand
@@ -315,9 +286,6 @@ complete -c hop -n '__hop_using_command list' -l limit -s l -d 'limit results'
 # export with --format
 complete -c hop -n '__hop_using_command export' -l format -d 'specify format' -a 'json csv tsv'
 
-# update with --dry-run
-complete -c hop -n '__hop_using_command update' -l dry-run -d 'preview what would be installed'
-
 # prune with flags
 complete -c hop -n '__hop_using_command prune' -l dry-run -d 'preview stale paths'
 complete -c hop -n '__hop_using_command prune' -l quiet   -d 'suppress progress output'
@@ -333,36 +301,6 @@ complete -c hop -n '__hop_using_command stats' -s V        -d 'show verbose stat
 complete -c hop -n '__hop_using_command history' -a '10 20 50 100' -d 'limit count'
 complete -c hop -n '__hop_using_command recent'   -a '10 20 50 100' -d 'limit count'
 
-# explain → query
-complete -c hop -n '__hop_using_command explain' -f -d 'query string'
-"#;
-
-const NUSHELL: &str = r#"# hop nushell completion
-# Save this to a file and use it with:
-#   use ~/some/path/hop_completions.nu
-
-export extern hop [
-    --help(-h)
-    --version(-v)
-    query:string
-]
-
-export alias h = hop
-
-# Subcommand completions via nushell's native mechanism
-# (nushell completions are typically registered at parse time)
-"#;
-
-const ELVISH: &str = r#"# hop elvish completion
-# Save this to ~/.local/share/hop/hop_completions.elv
-# and load it in your rc.elv: use ~/.local/share/hop/hop_completions.elv
-
-# Elvish completion for hop uses the built-in completion system.
-# A minimal stub that registers 'hop' as an external command:
-edit:completion:arg-completer[hop] = [@args] {
-    # Delegate to the hop binary's built-in bashcompctl fallback
-    ^hop --complete @args
-}
 "#;
 
 #[cfg(test)]
@@ -374,15 +312,12 @@ mod tests {
         assert!(script_for("bash").is_some());
         assert!(script_for("zsh").is_some());
         assert!(script_for("fish").is_some());
-        assert!(script_for("nushell").is_some());
-        assert!(script_for("nu").is_some());
-        assert!(script_for("elvish").is_some());
         assert!(script_for("unknown-shell").is_none());
     }
 
     #[test]
     fn each_script_mentions_hop() {
-        for shell in ["bash", "zsh", "fish", "nushell", "elvish"] {
+        for shell in ["bash", "zsh", "fish"] {
             let s = script_for(shell).unwrap();
             assert!(
                 s.contains("hop"),

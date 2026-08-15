@@ -1,7 +1,7 @@
 //! `hop` — smart directory jumper.
 //!
-//! A fuzzy `cd` replacement that learns your directory history, supports
-//! bookmarks, and can fall back to a filesystem index when history is cold.
+//! A fuzzy `cd` replacement that learns your directory history and supports
+//! bookmarks.
 //!
 //! The same crate powers the `hop` binary and is published as a library so
 //! integrations (wrappers, plugins, tests) can reuse the dispatch logic and
@@ -9,8 +9,8 @@
 //!
 //! # Entry points
 //! - [`cli::run`] — dispatches a raw `argv`, the same way the binary does.
-//! - [`cli::find_best`] — resolve a query to the best path using bookmarks,
-//!   history, and (fallback) the filesystem index.
+//! - [`cli::find_best`] — resolve a query to the best path using bookmarks
+//!   and history.
 //! - [`Database`] — SQLite-backed store. [`Database::open`] handles XDG
 //!   paths, WAL setup, migrations, and the `fuzzy-cd` → `hop` legacy copy.
 //! - [`init::script_for`] — shell integration scripts for bash/zsh/fish.
@@ -29,7 +29,6 @@ pub mod config;
 pub mod db;
 pub mod doctor;
 pub mod import;
-pub mod index;
 pub mod init;
 pub mod picker;
 pub mod score;

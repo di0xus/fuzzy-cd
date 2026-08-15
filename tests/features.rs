@@ -73,13 +73,13 @@ fn add_dry_run_prints_message_without_writing_to_db() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Feature 2: hop explain <query>
+// Feature 2: hop score <query>
 // Expected: shows per-component score breakdown (fuzzy, visits, recency, etc.)
 // for the top results.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn explain_shows_score_breakdown_for_results() {
+fn score_shows_breakdown_for_results() {
     let tmp = tempfile::tempdir().unwrap();
     let target = tmp.path().join("explain-test");
     std::fs::create_dir(&target).unwrap();
@@ -94,19 +94,19 @@ fn explain_shows_score_breakdown_for_results() {
         .output()
         .unwrap();
 
-    // Run explain
+    // Run score
     let out = Command::new(env!("CARGO_BIN_EXE_hop"))
         .env("XDG_DATA_HOME", &tmp_keep)
         .env("HOME", &tmp_keep)
-        .args(["explain", "explain"])
+        .args(["score", "explain"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "explain should succeed");
+    assert!(out.status.success(), "score should succeed");
     let stdout = String::from_utf8_lossy(&out.stdout);
     // Should show component headers / breakdown
     assert!(
         stdout.contains("fuzzy") || stdout.contains("total=") || stdout.contains("visits="),
-        "explain output should contain score breakdown, got: {}",
+        "score output should contain score breakdown, got: {}",
         stdout
     );
 }

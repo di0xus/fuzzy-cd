@@ -12,7 +12,7 @@ pub const APP_NAME: &str = "hop";
 pub const DB_NAME: &str = "hop.db";
 pub const LEGACY_APP_NAME: &str = "fuzzy-cd";
 pub const LEGACY_DB_NAME: &str = "fuzzy-cd.db";
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub struct Database {
     conn: Connection,
@@ -167,16 +167,7 @@ impl Database {
                     alias TEXT UNIQUE NOT NULL,
                     path TEXT NOT NULL,
                     created_at REAL NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS dir_index (
-                    id INTEGER PRIMARY KEY,
-                    path TEXT UNIQUE NOT NULL,
-                    basename TEXT NOT NULL,
-                    parent TEXT NOT NULL,
-                    indexed_at REAL NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_dir_index_basename ON dir_index(basename);",
+                );",
             )?;
         }
 
@@ -218,11 +209,6 @@ impl Database {
                 "CREATE INDEX IF NOT EXISTS idx_history_basename ON history(basename)",
                 [],
             )?;
-            // Index parent column for efficient child-lookup queries.
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_dir_index_parent ON dir_index(parent)",
-                [],
-            )?;
         }
 
         if version < 3 {
@@ -233,6 +219,12 @@ impl Database {
             )?;
         }
 
+        if version < 4 {
+            // v4: the filesystem index subsystem was removed; drop the table.
+            // Older DBs keep their data, it is simply no longer consulted.
+            self.conn.execute("DROP TABLE IF EXISTS dir_index", [])?;
+        }
+
         self.conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -241,6 +233,12 @@ impl Database {
     }
 
     pub fn record_visit(&self, path: &str) -> rusqlite::Result<()> {
+        self.record_visits(path, 1)
+    }
+
+    /// Record `visits` visits to `path` in a single upsert. Imports use this to
+    /// avoid one write (and one canonicalize) per visit.
+    pub fn record_visits(&self, path: &str, visits: i64) -> rusqlite::Result<()> {
         let now = now_secs();
         // Resolve symlinks to canonical path so /link/to/project and
         // /real/project share one history row.
@@ -249,12 +247,12 @@ impl Database {
         let is_git = Path::new(&canonical).join(".git").exists() as i64;
         self.conn.execute(
             "INSERT INTO history (path, basename, visits, last_visited, created_at, is_git_repo)
-             VALUES (?1, ?2, 1, ?3, ?3, ?4)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5)
              ON CONFLICT(path) DO UPDATE SET
-                visits = visits + 1,
-                last_visited = ?3,
-                is_git_repo = ?4",
-            params![canonical, basename, now, is_git],
+                visits = visits + ?3,
+                last_visited = ?4,
+                is_git_repo = ?5",
+            params![canonical, basename, visits, now, is_git],
         )?;
         Ok(())
     }
@@ -266,7 +264,6 @@ impl Database {
 
     pub fn clear_history(&self) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM history", [])?;
-        self.conn.execute("DELETE FROM dir_index", [])?;
         Ok(())
     }
 
@@ -274,13 +271,13 @@ impl Database {
         self.prune_stale_batch(256, |_, _| {})
     }
 
-    /// Remove stale history/index entries, processing in batches of `batch_size`.
+    /// Remove stale history entries, processing in batches of `batch_size`.
     /// Calls `progress` with (processed, total) after each batch.
     pub fn prune_stale_batch<F>(&self, batch_size: usize, progress: F) -> rusqlite::Result<usize>
     where
         F: Fn(usize, usize),
     {
-        // History stale — parallel is_dir() check across all paths, then sequential removal.
+        // Parallel is_dir() check across all paths, then sequential removal.
         let history_paths: Vec<String> = self
             .conn
             .prepare("SELECT path FROM history")?
@@ -302,34 +299,11 @@ impl Database {
             progress(chunk.len(), stale_history.len());
         }
         progress(removed, stale_history.len());
-
-        // Index stale — parallel is_dir() check, then sequential removal.
-        let index_paths: Vec<String> = self
-            .conn
-            .prepare("SELECT path FROM dir_index")?
-            .query_map([], |r| r.get::<_, String>(0))?
-            .flatten()
-            .collect();
-
-        let stale_index: Vec<String> = index_paths
-            .par_iter()
-            .filter(|p| !Path::new(p).is_dir())
-            .cloned()
-            .collect();
-
-        for chunk in stale_index.chunks(batch_size) {
-            for p in chunk {
-                self.conn
-                    .execute("DELETE FROM dir_index WHERE path = ?1", params![p])?;
-            }
-            progress(chunk.len(), stale_index.len());
-        }
-        progress(stale_index.len(), stale_index.len());
         Ok(removed)
     }
 
     /// Returns paths that would be removed by prune_stale, without deleting anything.
-    pub fn prune_stale_dry_run(&self) -> rusqlite::Result<(Vec<String>, Vec<String>)> {
+    pub fn prune_stale_dry_run(&self) -> rusqlite::Result<Vec<String>> {
         let history_stale: Vec<String> = self
             .conn
             .prepare("SELECT path FROM history")?
@@ -337,20 +311,13 @@ impl Database {
             .flatten()
             .filter(|p| !Path::new(p).is_dir())
             .collect();
-        let index_stale: Vec<String> = self
-            .conn
-            .prepare("SELECT path FROM dir_index")?
-            .query_map([], |r| r.get::<_, String>(0))?
-            .flatten()
-            .filter(|p| !Path::new(p).is_dir())
-            .collect();
-        Ok((history_stale, index_stale))
+        Ok(history_stale)
     }
 
     /// Auto-prune: remove history rows with visits=1 AND last_visited > 90 days ago.
-    /// Also removes stale (deleted dirs) entries. Skips paths whose basename matches skip_dirs.
+    /// Also removes stale (deleted dirs) entries.
     /// Returns the number of rows removed.
-    pub fn prune_auto(&self, skip_dirs: &[String]) -> rusqlite::Result<usize> {
+    pub fn prune_auto(&self) -> rusqlite::Result<usize> {
         let now = now_secs();
         let ninety_days = 90.0 * 86_400.0;
         let cutoff = now - ninety_days;
@@ -375,16 +342,8 @@ impl Database {
 
         let mut to_remove: Vec<i64> = Vec::new();
 
-        // Age-based: single visit, old, not in skip_dirs
-        for (rowid, path) in old_single {
-            if let Some(name) = Path::new(&path).file_name() {
-                let name_str = name.to_string_lossy();
-                if skip_dirs.iter().any(|d| d == name_str.as_ref()) {
-                    continue;
-                }
-            }
-            to_remove.push(rowid);
-        }
+        // Age-based: single visit, old
+        to_remove.extend(old_single.into_iter().map(|(rowid, _)| rowid));
 
         // Stale: path no longer exists
         for (rowid, path) in stale {
@@ -525,97 +484,40 @@ impl Database {
         new_path: Option<&str>,
         new_description: Option<&str>,
     ) -> rusqlite::Result<usize> {
-        let mut parts: Vec<String> = Vec::new();
+        let mut sets: Vec<String> = Vec::new();
+        let mut params: Vec<&str> = Vec::new();
 
         if let Some(a) = new_alias {
-            parts.push(format!("alias = '{}'", a.replace("'", "''")));
+            sets.push("alias = ?1".to_string());
+            params.push(a);
         }
         if let Some(p) = new_path {
-            parts.push(format!("path = '{}'", p.replace("'", "''")));
+            sets.push("path = ?2".to_string());
+            params.push(p);
         }
         if let Some(d) = new_description {
-            parts.push(format!("description = '{}'", d.replace("'", "''")));
+            sets.push("description = ?3".to_string());
+            params.push(d);
         }
 
-        if parts.is_empty() {
+        if sets.is_empty() {
             return Ok(0);
         }
 
-        let sql = format!(
-            "UPDATE bookmarks SET {} WHERE alias = '{}'",
-            parts.join(", "),
-            alias.replace("'", "''")
-        );
-        self.conn.execute(&sql, [])
-    }
-
-    pub fn upsert_indexed_dir(&self, path: &str) -> rusqlite::Result<()> {
-        let (basename, parent) = Self::indexed_dir_params(path);
-        self.conn.execute(
-            "INSERT INTO dir_index(path, basename, parent, indexed_at)
-             VALUES(?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET basename = ?2, parent = ?3, indexed_at = ?4",
-            params![path, basename, parent, now_secs()],
-        )?;
-        Ok(())
-    }
-
-    /// Extract (basename, parent) for dir_index. Both upsert methods share this logic.
-    fn indexed_dir_params(path: &str) -> (String, String) {
-        let basename = basename_lower(path);
-        let parent = Path::new(path)
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        (basename, parent)
-    }
-
-    pub fn batch_upsert_indexed_dirs(&self, paths: &[String]) -> rusqlite::Result<()> {
-        let now = now_secs();
-        self.conn.execute("BEGIN IMMEDIATE", [])?;
-        for path in paths {
-            let (basename, parent) = Self::indexed_dir_params(path);
-            self.conn.execute(
-                "INSERT INTO dir_index(path, basename, parent, indexed_at)
-                 VALUES(?1, ?2, ?3, ?4)
-                 ON CONFLICT(path) DO UPDATE SET basename = ?2, parent = ?3, indexed_at = ?4",
-                params![path, basename, parent, now],
-            )?;
-        }
-        self.conn.execute("COMMIT", [])?;
-        Ok(())
-    }
-
-    pub fn index_rows(&self) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT path FROM dir_index")?;
-        let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .flatten()
-            .collect();
-        Ok(rows)
+        params.push(alias);
+        let sql = format!("UPDATE bookmarks SET {} WHERE alias = ?4", sets.join(", "));
+        self.conn.execute(&sql, params_from_iter(params))
     }
 
     pub fn counts(&self) -> rusqlite::Result<DbCounts> {
         self.conn.query_row(
             r#"
-            WITH
-                hist_total  AS (SELECT COUNT(*)          AS n FROM history),
-                hist_visits AS (SELECT COALESCE(SUM(visits), 0) AS n FROM history),
-                bm_total    AS (SELECT COUNT(*)          AS n FROM bookmarks),
-                idx_total   AS (SELECT COUNT(*)          AS n FROM dir_index),
-                top_row     AS (
-                    SELECT path FROM history
-                    WHERE 1 = (SELECT COUNT(*) FROM history WHERE visits > history.visits)
-                    UNION ALL
-                    SELECT path FROM history WHERE 0 = (SELECT COUNT(*) FROM history)
-                    LIMIT 1
-                )
             SELECT
-                (SELECT n FROM hist_total)  AS total,
-                (SELECT n FROM hist_visits) AS total_visits,
-                (SELECT n FROM bm_total)    AS bookmarks,
-                (SELECT n FROM idx_total)   AS indexed,
-                (SELECT path FROM top_row)  AS top_path
+                (SELECT COUNT(*) FROM history)                          AS total,
+                (SELECT COALESCE(SUM(visits), 0) FROM history)          AS total_visits,
+                (SELECT COUNT(*) FROM bookmarks)                        AS bookmarks,
+                (SELECT path FROM history
+                 ORDER BY visits DESC, last_visited DESC LIMIT 1)        AS top_path
             "#,
             [],
             |r| {
@@ -623,8 +525,7 @@ impl Database {
                     total: r.get(0)?,
                     total_visits: r.get(1)?,
                     bookmarks: r.get(2)?,
-                    indexed: r.get(3)?,
-                    top_path: r.get(4)?,
+                    top_path: r.get(3)?,
                 })
             },
         )
@@ -647,7 +548,6 @@ pub struct DbCounts {
     pub total: i64,
     pub total_visits: i64,
     pub bookmarks: i64,
-    pub indexed: i64,
     pub top_path: Option<String>,
 }
 
@@ -699,6 +599,16 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].visits, 2);
         assert_eq!(rows[0].path, "/tmp/example");
+    }
+
+    #[test]
+    fn record_visits_batches_in_single_upsert() {
+        let db = Database::in_memory().unwrap();
+        db.record_visits("/tmp/example", 5).unwrap();
+        db.record_visits("/tmp/example", 2).unwrap();
+        let rows = db.history_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].visits, 7, "visits should accumulate across batches");
     }
 
     #[test]
@@ -789,11 +699,9 @@ mod tests {
         db.record_visit(&dead_s).unwrap();
         std::fs::remove_dir(&dead).unwrap();
 
-        let (hist, idx) = db.prune_stale_dry_run().unwrap();
+        let hist = db.prune_stale_dry_run().unwrap();
         assert!(hist.contains(&dead_s), "hist={hist:?}, dead_s={dead_s}",);
         assert!(!hist.contains(&alive_s));
-        // alive/dead are in history, index is empty
-        assert!(idx.is_empty());
     }
 
     #[test]

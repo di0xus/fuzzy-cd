@@ -108,7 +108,6 @@ pub fn import_dry_run(source: &str, path: &Path) -> Result<Vec<String>, ImportEr
         "autojump" => dry_run_autojump(path),
         "zoxide" => dry_run_zoxide(path),
         "zsh" => dry_run_zsh(path),
-        "thefuck" => dry_run_thefuck(path),
         _ => Err(ImportError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unknown source: {}", source),
@@ -204,33 +203,6 @@ fn dry_run_zsh(path: &Path) -> Result<Vec<String>, ImportError> {
     Ok(result)
 }
 
-fn dry_run_thefuck(path: &Path) -> Result<Vec<String>, ImportError> {
-    let content = read_to_string(path)?;
-    let mut result = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("alias ") {
-            continue;
-        }
-        let after_alias = match trimmed.strip_prefix("alias ") {
-            Some(s) => s,
-            None => continue,
-        };
-        let (alias, expr) = match after_alias.split_once('=') {
-            Some((a, e)) => (a, e),
-            None => continue,
-        };
-        let expr = expr.trim_matches(|c| c == '\'' || c == '"');
-        if let Some(target) = extract_cd_target_from_alias_expr(expr) {
-            let abs = expand_home(&target);
-            if is_existing_dir(&abs) && !alias.trim().is_empty() {
-                result.push(format!("{} -> {}", alias.trim(), abs.display()));
-            }
-        }
-    }
-    Ok(result)
-}
-
 /// fasd `.fasd` cache is tab-separated: `path\tvisits\tlast`.
 pub fn import_fasd(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
     let content = read_to_string(path)?;
@@ -255,10 +227,7 @@ pub fn import_fasd(db: &Database, path: &Path) -> Result<ImportStats, ImportErro
             .clamp(1, 100);
         let abs = expand_home(raw_path);
         if is_existing_dir(&abs) {
-            let as_str = abs.to_string_lossy();
-            for _ in 0..visits {
-                db.record_visit(&as_str).ok();
-            }
+            db.record_visits(&abs.to_string_lossy(), visits as i64).ok();
             stats.imported += 1;
         } else {
             stats.skipped += 1;
@@ -435,10 +404,8 @@ pub fn import_autojump(db: &Database, path: &Path) -> Result<ImportStats, Import
         if is_existing_dir(&abs) {
             // Record visit once per autojump weight bucket (1-100 → 1-10 visits)
             let visits = (weight.clamp(1.0, 100.0) / 10.0) as i32;
-            let as_str = abs.to_string_lossy();
-            for _ in 0..visits.max(1) {
-                db.record_visit(&as_str).ok();
-            }
+            db.record_visits(&abs.to_string_lossy(), visits.max(1) as i64)
+                .ok();
             stats.imported += 1;
         } else {
             stats.skipped += 1;
@@ -470,10 +437,8 @@ pub fn import_zoxide(db: &Database, path: &Path) -> Result<ImportStats, ImportEr
             let abs = expand_home(&entry.0);
             if is_existing_dir(&abs) {
                 let visits = (entry.1.clamp(1.0, 100.0) / 10.0) as i32;
-                let as_str = abs.to_string_lossy();
-                for _ in 0..visits.max(1) {
-                    db.record_visit(&as_str).ok();
-                }
+                db.record_visits(&abs.to_string_lossy(), visits.max(1) as i64)
+                    .ok();
                 stats.imported += 1;
             } else {
                 stats.skipped += 1;
@@ -495,149 +460,4 @@ pub fn import_zoxide(db: &Database, path: &Path) -> Result<ImportStats, ImportEr
         }
     }
     Ok(stats)
-}
-
-/// thefuck alias import — parses shell alias lines from a file and offers
-/// directories mentioned in alias targets as bookmarks.
-/// Looks for `alias <name>='cd <path>'` or `alias <name>="cd <path>"` patterns.
-pub fn import_thefuck(db: &Database, path: &Path) -> Result<ImportStats, ImportError> {
-    let content = read_to_string(path)?;
-    let mut stats = ImportStats {
-        imported: 0,
-        skipped: 0,
-    };
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("alias ") {
-            continue;
-        }
-        let after_alias = match trimmed.strip_prefix("alias ") {
-            Some(s) => s,
-            None => continue,
-        };
-        // Parse alias name=expression
-        let (alias, expr) = match after_alias.split_once('=') {
-            Some((a, e)) => (a, e),
-            None => continue,
-        };
-        // Strip quotes from expression
-        let expr = expr.trim_matches(|c| c == '\'' || c == '"');
-        // Look for cd or pushd targets
-        if let Some(target) = extract_cd_target_from_alias_expr(expr) {
-            let abs = expand_home(&target);
-            if is_existing_dir(&abs) {
-                // Register as a bookmark with the alias name
-                let alias_clean = alias.trim();
-                if !alias_clean.is_empty() {
-                    db.set_bookmark(alias_clean, &abs.to_string_lossy()).ok();
-                    stats.imported += 1;
-                }
-            } else {
-                stats.skipped += 1;
-            }
-        }
-    }
-    Ok(stats)
-}
-
-/// Extract cd/pushd path from a thefuck alias expression like `cd /path`
-fn extract_cd_target_from_alias_expr(expr: &str) -> Option<String> {
-    let tokens: Vec<&str> = expr.split_whitespace().collect();
-    let mut it = tokens.iter();
-    let verb = it.next()?;
-    if *verb != "cd" && *verb != "pushd" {
-        return None;
-    }
-    let arg = it.next()?;
-    if arg.starts_with('-') || arg.contains('$') || arg.contains('`') {
-        return None;
-    }
-    Some(arg.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_plain_cd() {
-        assert_eq!(extract_cd_target("cd /tmp").as_deref(), Some("/tmp"));
-        assert_eq!(extract_cd_target("cd ~/foo").as_deref(), Some("~/foo"));
-        assert_eq!(extract_cd_target("pushd /a/b").as_deref(), Some("/a/b"));
-    }
-
-    #[test]
-    fn rejects_non_cd_and_bad_forms() {
-        assert!(extract_cd_target("ls /tmp").is_none());
-        assert!(extract_cd_target("cd -").is_none());
-        assert!(extract_cd_target("cd").is_none());
-        assert!(extract_cd_target("cd $HOME").is_none());
-        assert!(extract_cd_target("cd $(pwd)").is_none());
-    }
-
-    #[test]
-    fn strips_quotes() {
-        assert_eq!(extract_cd_target("cd \"/a b\"").as_deref(), Some("/a b"));
-        assert_eq!(extract_cd_target("cd '/x'").as_deref(), Some("/x"));
-    }
-
-    #[test]
-    fn handles_compound() {
-        assert_eq!(extract_cd_target("cd /tmp && ls").as_deref(), Some("/tmp"));
-    }
-
-    #[test]
-    fn parses_extended_history() {
-        let raw = ": 1700000000:0;cd /tmp\n: 1700000001:0;ls\n";
-        let cmds = parse_zsh_history(raw);
-        assert_eq!(cmds, vec!["cd /tmp".to_string(), "ls".to_string()]);
-    }
-
-    #[test]
-    fn parses_plain_history() {
-        let raw = "cd /tmp\nls\n";
-        let cmds = parse_zsh_history(raw);
-        assert_eq!(cmds, vec!["cd /tmp".to_string(), "ls".to_string()]);
-    }
-
-    #[test]
-    fn joins_multiline_continuation() {
-        let raw = ": 1700000000:0;echo a\\\nb\n";
-        let cmds = parse_zsh_history(raw);
-        assert_eq!(cmds, vec!["echo a\nb".to_string()]);
-    }
-
-    #[test]
-    fn import_fasd_from_tempfile() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("sub");
-        std::fs::create_dir(&target).unwrap();
-        let fasd_file = tmp.path().join(".fasd");
-        let line = format!("{}\t5\t1700000000\n", target.display());
-        std::fs::write(&fasd_file, line).unwrap();
-
-        let db = Database::in_memory().unwrap();
-        let stats = import_fasd(&db, &fasd_file).unwrap();
-        assert_eq!(stats.imported, 1);
-        let rows = db.history_rows().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].visits, 5);
-    }
-
-    #[test]
-    fn import_zsh_from_tempfile() {
-        let tmp = tempfile::tempdir().unwrap();
-        let real = tmp.path().join("real");
-        std::fs::create_dir(&real).unwrap();
-        let hist = tmp.path().join("hist");
-        let content = format!(
-            ": 1700000000:0;cd {}\n: 1700000001:0;cd /definitely/not/here/xyz\n: 1700000002:0;ls\n",
-            real.display()
-        );
-        std::fs::write(&hist, content).unwrap();
-        let db = Database::in_memory().unwrap();
-        let stats = import_zsh(&db, &hist).unwrap();
-        assert_eq!(stats.imported, 1);
-        assert_eq!(stats.skipped, 1);
-    }
 }

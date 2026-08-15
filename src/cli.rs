@@ -1,13 +1,13 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::completions;
 use crate::config::Config;
 use crate::db::{canonicalize_path, default_data_dir, expand_home, now_secs, Database, HistoryRow};
-use crate::index;
 use crate::init;
 use crate::picker;
-use crate::score::{ScoreBreakdown, Scored, Scorer};
+use crate::score::{Scored, Scorer};
 use crate::{doctor, import};
 use serde_json;
 
@@ -15,32 +15,32 @@ pub const HELP: &str = r#"hop — smart directory jump
 
 Usage:
     hop <query>                  Jump to best match (prints path)
+    hop -                        Previous directory (like cd -)
+    hop ~/path, .., ./dir        Literal paths work like cd
+    hop foo bar                  All words must match (AND)
+    hop foo /                    Subdirectory of cwd starting with "foo"
     hop p|pick [query]           Same; empty query opens picker
     hop add <path>               Record a visit
     hop rm <path>                Remove from history (exact path)
-    hop forget|zap <query>       Fuzzy-find and remove from history
+    hop forget [query]           Remove from history; empty query opens picker
     hop book [alias] [path]      Set or resolve a bookmark
     hop book list [--json]       List all bookmarks
     hop book rm <alias>          Delete a bookmark
     hop book edit <alias>        Edit alias, path, or description
     hop history [n]              Top n by visits (default 20)
     hop recent [n]               Last n visited (default 20)
-    hop top                      Top 10.
-    hop score <query>            Show per-component score breakdown
-    hop score <query> --json     Same, JSON output
+    hop score <query> [--json]   Show per-component score breakdown
     hop list <query> [--limit N] [--json]  List all scored matches
     hop export [--format json|csv|tsv]  Dump history/bookmarks
-    hop import fasd|autojump|zoxide|thefuck <file>  Import from another tool
-    hop prune [--dry-run]         Remove stale (deleted) paths
-    hop clear [--force]           Wipe history (prompts by default)
-    hop stats                    DB stats.
-    hop reindex                  Rebuild filesystem index
+    hop import fasd|autojump|zoxide|zsh <file>  Import from another tool
+    hop prune [--dry-run]        Remove stale (deleted) paths
+    hop clear [--force]          Wipe history (prompts by default)
+    hop stats                    DB stats
     hop doctor                   Diagnose setup
-    hop update [--dry-run]       Self-update to latest release
-    hop init <bash|zsh|fish|nushell|elvish>  Emit shell integration
-    hop init --shell <shell>                 Same, with explicit flag
-    hop init --verify                        Check shell integration
-    hop completions <bash|zsh|fish|nushell|elvish>  Emit tab-completion script
+    hop init <bash|zsh|fish>     Emit shell integration
+    hop init --shell <shell>     Same, with explicit flag
+    hop init --verify            Check shell integration
+    hop completions <bash|zsh|fish>  Emit tab-completion script
     hop --help                   This help
 "#;
 
@@ -80,7 +80,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
     // Auto-prune on startup if configured
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-V");
     if cfg.auto_prune_on_startup {
-        if let Ok(removed) = db.prune_auto(&cfg.skip_dirs) {
+        if let Ok(removed) = db.prune_auto() {
             if verbose && removed > 0 {
                 eprintln!("auto-pruned {} stale entries", removed);
             }
@@ -99,31 +99,21 @@ pub fn run(args: Vec<String>) -> ExitCode {
             if query.is_empty() {
                 return run_picker_and_print("");
             }
-            match find_best(&db, &cfg, &query) {
-                Some(path) => {
-                    println!("{}", path);
-                    let _ = db.record_visit(&path);
-                    ExitCode::SUCCESS
-                }
-                None => ExitCode::from(1),
-            }
+            cmd_jump(&db, &cfg, &query)
         }
+        "-" => cmd_prev(&db),
         "add" => {
-            // Parse arguments: handles hop add <path>, hop add --dry-run <path>, hop add <path> --dry-run
-            let dry_run = args[2..].iter().any(|a| a == "--dry-run");
+            // Strip the `--` separator — every shell hook calls `hop add -- "$PWD"`.
+            // --dry-run may appear before or after the path.
+            let rest: Vec<&str> = args[2..]
+                .iter()
+                .map(String::as_str)
+                .filter(|s| *s != "--")
+                .collect();
+            let dry_run = rest.contains(&"--dry-run");
+            let raw_arg = rest.iter().copied().find(|a| *a != "--dry-run");
 
-            let arg = if args.len() >= 4 && args[2] == "--dry-run" {
-                // hop add --dry-run <path>
-                args.get(3)
-            } else if args.len() >= 5 && args[3] == "--dry-run" {
-                // hop add <path> --dry-run
-                args.get(2)
-            } else {
-                // hop add <path>
-                args.get(2)
-            };
-
-            let Some(raw_arg) = arg else {
+            let Some(raw_arg) = raw_arg else {
                 eprintln!("Usage: hop add <path> [--dry-run]");
                 return ExitCode::from(2);
             };
@@ -165,7 +155,12 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 return ExitCode::from(2);
             };
             let path = expand_home(arg);
-            let removed = match db.forget(&path.to_string_lossy()) {
+            // History stores canonical paths (record_visit canonicalizes), so
+            // match against the canonical form — otherwise `rm` fails for any
+            // path reached through a symlink (e.g. /var → /private/var on macOS).
+            let canon = canonicalize_path(&path.to_string_lossy())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            let removed = match db.forget(&canon) {
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("remove failed: {}", e);
@@ -173,14 +168,14 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 }
             };
             if removed > 0 {
-                println!("removed: {}", path.display());
+                println!("removed: {}", canon);
                 ExitCode::SUCCESS
             } else {
-                println!("not found in history: {}", path.display());
+                println!("not found in history: {}", canon);
                 ExitCode::from(1)
             }
         }
-        "forget" | "zap" => {
+        "forget" => {
             let dry_run = args[2..].iter().any(|a| a == "--dry-run");
             let query: String = args[2..]
                 .iter()
@@ -189,8 +184,12 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 .collect::<Vec<_>>()
                 .join(" ");
             if query.is_empty() {
-                eprintln!("Usage: hop forget|zap <query> [--dry-run]");
-                return ExitCode::from(2);
+                if dry_run {
+                    eprintln!("Usage: hop forget <query> [--dry-run]");
+                    return ExitCode::from(2);
+                }
+                // No query → interactive picker to choose what to forget.
+                return cmd_forget_pick(&db);
             }
             match find_best(&db, &cfg, &query) {
                 Some(path) => {
@@ -218,7 +217,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 }
             }
         }
-        "book" | "bookmark" => {
+        "book" => {
             let book_json = args[2..].iter().any(|a| a == "--json" || a == "-j");
             cmd_bookmark(&db, &args[2..], book_json)
         }
@@ -246,7 +245,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 eprintln!("Usage: hop score <query> [--json]");
                 return ExitCode::from(2);
             }
-            cmd_score(&db, &cfg, &query, is_json)
+            cmd_score(&db, &query, is_json)
         }
         "list" => {
             let query = args[2..]
@@ -261,7 +260,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 .position(|a| a == "--limit")
                 .and_then(|i| args.get(i + 1)?.parse().ok())
                 .unwrap_or(20);
-            cmd_list(&db, &cfg, &query, limit, is_json)
+            cmd_list(&db, &query, limit, is_json)
         }
         "export" => {
             let format = args
@@ -270,21 +269,6 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 .and_then(|i| args.get(i + 1).cloned())
                 .unwrap_or_else(|| "json".to_string());
             cmd_export(&db, &format)
-        }
-        "update" => {
-            let dry_run = args.get(2).map(String::as_str) == Some("--dry-run");
-            cmd_update(dry_run)
-        }
-        "top" => {
-            let top_rows = match db.top(10) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("top query failed: {}", e);
-                    return ExitCode::from(1);
-                }
-            };
-            print_rows(&Database::filter_live_rows(top_rows));
-            ExitCode::SUCCESS
         }
         "recent" => {
             let n = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
@@ -304,7 +288,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             let source;
             let file;
 
-            if args.len() >= 4 && args[2] == "--dry-run" {
+            if args.len() >= 5 && args[2] == "--dry-run" {
                 // hop import --dry-run <source> <file>
                 source = args[3].as_str();
                 file = Path::new(&args[4]);
@@ -312,11 +296,15 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 // hop import <source> --dry-run <file>
                 source = args[2].as_str();
                 file = Path::new(&args[4]);
+            } else if args.len() == 4 && args[2] == "--dry-run" {
+                // hop import --dry-run <source> — file is missing
+                eprintln!("Usage: hop import [--dry-run] <fasd|autojump|zoxide|zsh> <file>");
+                return ExitCode::from(2);
             } else if args.len() >= 4 {
                 source = args[2].as_str();
                 file = Path::new(&args[3]);
             } else {
-                eprintln!("Usage: hop import [--dry-run] <fasd|autojump|zoxide|thefuck> <file>");
+                eprintln!("Usage: hop import [--dry-run] <fasd|autojump|zoxide|zsh> <file>");
                 return ExitCode::from(2);
             };
 
@@ -340,7 +328,6 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     "fasd" => import::import_fasd(&db, file),
                     "autojump" => import::import_autojump(&db, file),
                     "zoxide" => import::import_zoxide(&db, file),
-                    "thefuck" => import::import_thefuck(&db, file),
                     "zsh" => import::import_zsh(&db, file),
                     _ => {
                         eprintln!("unknown source: {}", source);
@@ -365,23 +352,17 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 || args.get(3).map(String::as_str) == Some("--quiet");
             if dry_run {
                 match db.prune_stale_dry_run() {
-                    Ok((history_stale, index_stale)) => {
-                        let total = history_stale.len() + index_stale.len();
-                        if total == 0 {
+                    Ok(history_stale) => {
+                        if history_stale.is_empty() {
                             println!("nothing to prune");
                         } else {
-                            println!("history ({}):", history_stale.len());
                             for p in &history_stale {
-                                println!("  - {}", p);
-                            }
-                            println!("index ({}):", index_stale.len());
-                            for p in &index_stale {
                                 println!("  - {}", p);
                             }
                             println!(
                                 "\n{} stale entr{} total. Run without --dry-run to remove.",
-                                total,
-                                if total == 1 { "y" } else { "ies" }
+                                history_stale.len(),
+                                if history_stale.len() == 1 { "y" } else { "ies" }
                             );
                         }
                     }
@@ -391,9 +372,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     }
                 }
             } else {
-                let total_paths = db.history_rows().map(|r| r.len()).unwrap_or(0);
-                let total_index = db.index_rows().map(|r| r.len()).unwrap_or(0);
-                let grand_total = total_paths + total_index;
+                let grand_total = db.history_rows().map(|r| r.len()).unwrap_or(0);
 
                 if !quiet && grand_total > 0 {
                     eprintln!("pruning {} entries...", grand_total);
@@ -424,9 +403,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         "clear" => {
             let force = args.get(2).map(String::as_str) == Some("--force");
             if !force {
-                eprint!(
-                    "this will wipe ALL history and the directory index. type 'yes' to confirm: "
-                );
+                eprint!("this will wipe ALL history. type 'yes' to confirm: ");
                 let mut input = String::new();
                 if std::io::stdin().read_line(&mut input).is_err() || input.trim() != "yes" {
                     println!("aborted");
@@ -448,24 +425,6 @@ pub fn run(args: Vec<String>) -> ExitCode {
             let verbose = args.iter().any(|a| a == "--verbose" || a == "-V");
             cmd_stats(&db, verbose)
         }
-        "reindex" | "--reindex" | "-r" => {
-            let dry_run = args[2..].iter().any(|a| a == "--dry-run");
-            match index::reindex(&db, &cfg, dry_run) {
-                Ok(stats) => {
-                    println!(
-                        "indexed {} dirs ({} scanned){}",
-                        stats.inserted,
-                        stats.scanned,
-                        if dry_run { " [dry-run]" } else { "" }
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("reindex failed: {}", e);
-                    ExitCode::from(1)
-                }
-            }
-        }
         "doctor" => {
             let r = doctor::run(&db);
             for line in &r.lines {
@@ -477,26 +436,77 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 ExitCode::from(1)
             }
         }
-        "explain" => {
-            let query = args[2..].join(" ");
-            if query.is_empty() {
-                eprintln!("Usage: hop explain <query>");
-                return ExitCode::from(2);
-            }
-            cmd_explain(&db, &cfg, &query)
-        }
         _ => {
             // treat unrecognized first arg as a query
             let query = args[1..].join(" ");
-            match find_best(&db, &cfg, &query) {
-                Some(path) => {
-                    println!("{}", path);
-                    let _ = db.record_visit(&path);
-                    ExitCode::SUCCESS
-                }
-                None => ExitCode::from(1),
-            }
+            cmd_jump(&db, &cfg, &query)
         }
+    }
+}
+
+/// Resolve `query` to a path and print it, recording the visit. Prints a hint
+/// on cold-start (empty history) instead of failing silently.
+fn cmd_jump(db: &Database, cfg: &Config, query: &str) -> ExitCode {
+    match find_best(db, cfg, query) {
+        Some(path) => {
+            println!("{}", path);
+            let _ = db.record_visit(&path);
+            ExitCode::SUCCESS
+        }
+        None => {
+            if db.history_rows().map(|r| r.is_empty()).unwrap_or(true) {
+                eprintln!(
+                    "no history yet — cd around (or run `hop add <dir>`) to teach hop your directories"
+                );
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `hop -`: print the second-most-recent live directory, like `cd -` but
+/// across sessions. Records the jump so repeated use toggles back and forth.
+fn cmd_prev(db: &Database) -> ExitCode {
+    let rows = match db.recent(2) {
+        Ok(r) => Database::filter_live_rows(r),
+        Err(e) => {
+            eprintln!("history query failed: {}", e);
+            return ExitCode::from(1);
+        }
+    };
+    let Some(prev) = rows.get(1) else {
+        eprintln!("no previous directory yet — visit a couple of dirs first");
+        return ExitCode::from(1);
+    };
+    println!("{}", prev.path);
+    let _ = db.record_visit(&prev.path);
+    ExitCode::SUCCESS
+}
+
+/// `hop forget` with no query: pick an entry interactively, then delete it.
+fn cmd_forget_pick(db: &Database) -> ExitCode {
+    match picker::run(db, "") {
+        Ok(Some(path)) => match db.forget(&path) {
+            Ok(n) if n > 0 => {
+                println!("forgot: {}", path);
+                ExitCode::SUCCESS
+            }
+            _ => {
+                eprintln!("not found in history: {}", path);
+                ExitCode::from(1)
+            }
+        },
+        Ok(None) => ExitCode::from(1),
+        Err(_) => ExitCode::from(1),
+    }
+}
+
+/// Escape a field for CSV output: quote and double any embedded quotes.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
     }
 }
 
@@ -600,12 +610,19 @@ fn cmd_completions(args: &[String]) -> ExitCode {
 }
 
 fn cmd_bookmark(db: &Database, args: &[String], is_json: bool) -> ExitCode {
+    // --json/-j may appear before or after the subcommand; strip them so
+    // `hop book --json list` dispatches to list instead of creating a
+    // bookmark aliased "--json".
+    let args: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|a| *a != "--json" && *a != "-j")
+        .collect();
+
     if args.is_empty() || args[0] == "list" {
-        let list_arg = args.first().map(String::as_str);
-        let is_list_json = list_arg == Some("--json") || list_arg == Some("-j");
         match db.bookmarks() {
             Ok(bms) => {
-                if is_json || is_list_json {
+                if is_json {
                     let items: Vec<_> = bms
                         .iter()
                         .map(|(alias, path, description)| {
@@ -627,7 +644,7 @@ fn cmd_bookmark(db: &Database, args: &[String], is_json: bool) -> ExitCode {
             eprintln!("Usage: hop book rm <alias>");
             return ExitCode::from(2);
         }
-        let removed = match db.remove_bookmark(&args[1]) {
+        let removed = match db.remove_bookmark(args[1]) {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("remove_bookmark failed: {}", e);
@@ -653,18 +670,18 @@ fn cmd_bookmark(db: &Database, args: &[String], is_json: bool) -> ExitCode {
 
         let mut i = 2;
         while i < args.len() {
-            match args[i].as_str() {
+            match args[i] {
                 "--alias" => {
                     i += 1;
-                    new_alias = args.get(i).map(String::as_str);
+                    new_alias = args.get(i).copied();
                 }
                 "--path" => {
                     i += 1;
-                    new_path = args.get(i).map(String::as_str);
+                    new_path = args.get(i).copied();
                 }
                 "--description" => {
                     i += 1;
-                    new_description = args.get(i).map(String::as_str);
+                    new_description = args.get(i).copied();
                 }
                 _ => {
                     eprintln!("unknown flag: {}\nUsage: hop book edit <alias> [--alias <new>] [--path <path>] [--description <text>]", args[i]);
@@ -727,7 +744,7 @@ fn cmd_bookmark(db: &Database, args: &[String], is_json: bool) -> ExitCode {
     } else {
         let alias = &args[0];
         if args.len() > 1 {
-            let path = expand_home(&args[1]);
+            let path = expand_home(args[1]);
             if !path.is_dir() {
                 eprintln!("not a directory: {}", path.display());
                 return ExitCode::from(1);
@@ -750,11 +767,10 @@ fn cmd_stats(db: &Database, verbose: bool) -> ExitCode {
     match db.counts() {
         Ok(c) => {
             println!(
-                "paths: {}\nvisits: {}\nbookmarks: {}\nindexed dirs: {}\ntop: {}",
+                "paths: {}\nvisits: {}\nbookmarks: {}\ntop: {}",
                 c.total,
                 c.total_visits,
                 c.bookmarks,
-                c.indexed,
                 c.top_path.unwrap_or_else(|| "(none)".into())
             );
             // Auto-suggest prune if > 20% of history is stale
@@ -870,9 +886,19 @@ fn run_picker_and_print(query: &str) -> ExitCode {
 }
 
 pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
-    // If the query resolves to an existing directory (possibly via symlink),
-    // canonicalize it so we match the canonical path stored in history.
-    if let Some(canonical) = canonicalize_path(query) {
+    // "foo /" → the most recently modified subdirectory of cwd starting with "foo"
+    if let Some((prefix, rest)) = query.split_once(' ') {
+        if rest.trim() == "/" && !prefix.trim().is_empty() {
+            if let Some(p) = subdir_match(prefix.trim()) {
+                return Some(p);
+            }
+        }
+    }
+
+    // If the query resolves to an existing directory (possibly via symlink or
+    // ~ expansion), canonicalize it so we match the canonical path in history.
+    let expanded = expand_home(query);
+    if let Some(canonical) = canonicalize_path(&expanded.to_string_lossy()) {
         if Path::new(&canonical).is_dir() {
             return Some(canonical);
         }
@@ -885,54 +911,88 @@ pub fn find_best(db: &Database, cfg: &Config, query: &str) -> Option<String> {
         }
     }
 
-    score_candidates(db, cfg, query)
-        .into_iter()
-        .find(|c| c.score >= cfg.min_score)
-        .map(|c| c.path)
+    let cands = score_candidates(db, query);
+    let cutoff = cands
+        .iter()
+        .position(|c| c.score < cfg.min_score)
+        .unwrap_or(cands.len());
+    first_live(&cands[..cutoff], 20).map(|c| c.path.clone())
 }
 
-/// Shared helper: score all sources (bookmarks, history, index fallback)
-/// and return sorted, deduped candidates. Used by find_best and cmd_list.
-fn score_candidates(db: &Database, cfg: &Config, query: &str) -> Vec<Scored> {
+/// Shared helper: score all sources (bookmarks, history) and return sorted,
+/// deduped candidates. Pure in-memory — no filesystem checks — so the hot
+/// path (find_best) pays no stat() per history row. Callers that display
+/// results apply [`live_candidates`]; [`first_live`] finds the jump target.
+fn score_candidates(db: &Database, query: &str) -> Vec<Scored> {
     let scorer = Scorer::new(now_secs());
     let mut cands: Vec<Scored> = Vec::new();
 
     if let Ok(bms) = db.bookmarks() {
         for (alias, path, _description) in bms {
             if let Some(s) = scorer.score_bookmark(&alias, &path, query) {
-                if Path::new(&s.path).is_dir() {
-                    cands.push(s);
-                }
+                cands.push(s);
             }
         }
     }
 
     if let Ok(rows) = db.history_rows() {
         let (scored, _) = crate::score::score_history_batch(&scorer, &rows, query);
-        for s in scored {
-            if Path::new(&s.path).is_dir() {
-                cands.push(s);
-            }
-        }
-    }
-
-    // Fallback to filesystem index if nothing strong found
-    let best_history = cands.iter().map(|c| c.score).max().unwrap_or(0);
-    if best_history < cfg.min_score * 2 {
-        if let Ok(paths) = db.index_rows() {
-            for p in paths {
-                if let Some(s) = scorer.score_indexed(&p, query) {
-                    if Path::new(&s.path).is_dir() {
-                        cands.push(s);
-                    }
-                }
-            }
-        }
+        cands.extend(scored);
     }
 
     cands.sort_by_key(|c| std::cmp::Reverse(c.score));
     cands.dedup_by(|a, b| a.path == b.path);
     cands
+}
+
+/// Keep only candidates whose directory still exists (for display commands).
+fn live_candidates(cands: Vec<Scored>) -> Vec<Scored> {
+    cands
+        .into_iter()
+        .filter(|c| Path::new(&c.path).is_dir())
+        .collect()
+}
+
+/// First candidate whose directory still exists. Checks the top `budget`
+/// (stale dirs rank low, so the fast path is almost always enough), then falls
+/// back to a full scan so a pathological all-stale top can't hide a live match.
+fn first_live(cands: &[Scored], budget: usize) -> Option<&Scored> {
+    cands
+        .iter()
+        .take(budget)
+        .find(|c| Path::new(&c.path).is_dir())
+        .or_else(|| {
+            cands
+                .iter()
+                .skip(budget)
+                .find(|c| Path::new(&c.path).is_dir())
+        })
+}
+
+/// `"foo /"` → the most recently modified subdirectory of cwd whose name
+/// starts with `prefix`.
+fn subdir_match(prefix: &str) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let mut best: Option<(PathBuf, SystemTime)> = None;
+    for entry in std::fs::read_dir(&cwd).ok()?.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(prefix) {
+            continue;
+        }
+        let mtime = entry
+            .path()
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        if best.as_ref().map(|(_, t)| mtime >= *t).unwrap_or(true) {
+            best = Some((entry.path(), mtime));
+        }
+    }
+    best.map(|(p, _)| p.to_string_lossy().into_owned())
 }
 
 fn print_rows(rows: &[HistoryRow]) {
@@ -941,92 +1001,30 @@ fn print_rows(rows: &[HistoryRow]) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// v0.8: score, list, export, update
-// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_score(db: &Database, query: &str, is_json: bool) -> ExitCode {
+    let cands = live_candidates(score_candidates(db, query));
 
-/// Collect score breakdowns from bookmarks, history, and index fallback.
-fn collect_breakdowns(
-    db: &Database,
-    cfg: &Config,
-    query: &str,
-    scorer: &Scorer,
-) -> Vec<ScoreBreakdown> {
-    let mut breakdowns: Vec<ScoreBreakdown> = Vec::new();
-
-    // exact bookmark first
-    if let Ok(Some(p)) = db.bookmark_exact(query) {
-        if Path::new(&p).is_dir() {
-            if let Some(b) = scorer.score_bookmark_breakdown(query, &p, query) {
-                breakdowns.push(b);
-            }
-        }
-    }
-
-    // score bookmarks
-    if let Ok(bms) = db.bookmarks() {
-        for (alias, path, _description) in bms {
-            if let Some(b) = scorer.score_bookmark_breakdown(&alias, &path, query) {
-                if Path::new(&b.path).is_dir() && b.total > cfg.min_score {
-                    breakdowns.push(b);
-                }
-            }
-        }
-    }
-
-    // score history with regex/negation support
-    if let Ok(rows) = db.history_rows() {
-        let more = crate::score::score_history_breakdown_batch(scorer, &rows, query);
-        for b in more {
-            if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
-                breakdowns.push(b);
-            }
-        }
-    }
-
-    // fallback index only if best is weak
-    let best_history = breakdowns.iter().map(|b| b.total).max().unwrap_or(0);
-    if best_history < cfg.min_score * 2 {
-        if let Ok(paths) = db.index_rows() {
-            for p in paths {
-                if let Some(b) = scorer.score_indexed_breakdown(&p, query) {
-                    if Path::new(&b.path).is_dir() && b.total >= cfg.min_score {
-                        breakdowns.push(b);
-                    }
-                }
-            }
-        }
-    }
-
-    breakdowns.sort_by_key(|b| std::cmp::Reverse(b.total));
-    breakdowns.dedup_by(|a, b| a.path == b.path);
-    breakdowns
-}
-
-fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCode {
-    let scorer = Scorer::new(now_secs());
-    let breakdowns = collect_breakdowns(db, cfg, query, &scorer);
-
-    if breakdowns.is_empty() {
+    if cands.is_empty() {
         return ExitCode::from(1);
     }
 
     if is_json {
         // Print top 10 as JSON
-        let tops: Vec<_> = breakdowns
+        let tops: Vec<_> = cands
             .iter()
             .take(10)
-            .map(|b| {
+            .map(|c| {
                 serde_json::json!({
-                    "path": b.path,
-                    "total": b.total,
-                    "fuzzy": b.fuzzy,
-                    "visits": b.visits,
-                    "recency": b.recency,
-                    "git": b.git,
-                    "basename": b.basename,
-                    "shortness": b.shortness,
-                    "source": format!("{:?}", b.source).to_lowercase(),
+                    "path": c.path,
+                    "total": c.score,
+                    "fuzzy": c.fuzzy,
+                    "visits": c.visits,
+                    "recency": c.recency,
+                    "git": c.git,
+                    "basename": c.basename,
+                    "shortness": c.shortness,
+                    "session": c.session,
+                    "source": format!("{:?}", c.source).to_lowercase(),
                 })
             })
             .collect();
@@ -1035,28 +1033,29 @@ fn cmd_score(db: &Database, cfg: &Config, query: &str, is_json: bool) -> ExitCod
         // Human-readable per-component breakdown
         println!("query: {}", query);
         println!();
-        for (i, b) in breakdowns.iter().take(10).enumerate() {
+        for (i, c) in cands.iter().take(10).enumerate() {
             let trophy = if i == 0 { " (best)" } else { "" };
             println!(
-                "{}{}  total={:>4}  fuzzy={:>3}  visits={:>3}  recency={:>2}  git={:>2}  basename={:>2}  shortness={:>2}  [{:?}]",
-                b.path,
+                "{}{}  total={:>4}  fuzzy={:>3}  visits={:>3}  recency={:>2}  git={:>2}  basename={:>2}  shortness={:>2}  session={:>2}  [{:?}]",
+                c.path,
                 trophy,
-                b.total,
-                b.fuzzy,
-                b.visits,
-                b.recency,
-                b.git,
-                b.basename,
-                b.shortness,
-                b.source,
+                c.score,
+                c.fuzzy,
+                c.visits,
+                c.recency,
+                c.git,
+                c.basename,
+                c.shortness,
+                c.session,
+                c.source,
             );
         }
     }
     ExitCode::SUCCESS
 }
 
-fn cmd_list(db: &Database, cfg: &Config, query: &str, limit: usize, is_json: bool) -> ExitCode {
-    let mut scored = score_candidates(db, cfg, query);
+fn cmd_list(db: &Database, query: &str, limit: usize, is_json: bool) -> ExitCode {
+    let mut scored = live_candidates(score_candidates(db, query));
     scored.truncate(limit);
 
     if scored.is_empty() {
@@ -1126,11 +1125,21 @@ fn cmd_export(db: &Database, format: &str) -> ExitCode {
             // Header: path,visits,last_visited,is_bookmark,alias,description
             println!("path,visits,last_visited,is_bookmark,alias,description");
             for r in &history {
-                println!("{},{},{},false,,", r.path, r.visits, r.last_visited);
+                println!(
+                    "{},{},{},false,,",
+                    csv_field(&r.path),
+                    r.visits,
+                    r.last_visited
+                );
             }
             for (alias, path, description) in &bookmarks {
                 // For bookmarks, visits=0 and is_bookmark=true
-                println!("{},0,0,true,{},{}", path, alias, description);
+                println!(
+                    "{},0,0,true,{},{}",
+                    csv_field(path),
+                    csv_field(alias),
+                    csv_field(description)
+                );
             }
         }
         "tsv" => {
@@ -1151,70 +1160,6 @@ fn cmd_export(db: &Database, format: &str) -> ExitCode {
     }
     ExitCode::SUCCESS
 }
-
-fn cmd_explain(db: &Database, cfg: &Config, query: &str) -> ExitCode {
-    let scorer = Scorer::new(now_secs());
-    let breakdowns = collect_breakdowns(db, cfg, query, &scorer);
-
-    if breakdowns.is_empty() {
-        return ExitCode::from(1);
-    }
-
-    // Human-readable per-component breakdown
-    println!("query: {}", query);
-    println!();
-    for (i, b) in breakdowns.iter().take(10).enumerate() {
-        let trophy = if i == 0 { " (best)" } else { "" };
-        println!(
-            "{}{}  total={:>4}  fuzzy={:>3}  visit_boost={:>3}  recency_boost={:>2}  git_bonus={:>2}  basename_bonus={:>2}  shortness={:>2}  [{:?}]",
-            b.path,
-            trophy,
-            b.total,
-            b.fuzzy,
-            b.visits,
-            b.recency,
-            b.git,
-            b.basename,
-            b.shortness,
-            b.source,
-        );
-    }
-    ExitCode::SUCCESS
-}
-
-fn cmd_update(dry_run: bool) -> ExitCode {
-    // Fetch latest release info from Codeberg API
-    let url = "https://codeberg.org/api/v1/repos/dioxus/hop/releases/latest";
-    let client = ureq::Agent::new();
-    match client.get(url).call() {
-        Ok(resp) => {
-            if resp.status() != 200 {
-                eprintln!("failed to fetch releases: HTTP {}", resp.status());
-                return ExitCode::from(1);
-            }
-            let body = resp.into_string().unwrap();
-            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-            let tag = body["tag_name"].as_str().unwrap_or("unknown");
-            let current = env!("CARGO_PKG_VERSION");
-            if tag == current {
-                println!("already at latest version: {}", current);
-                return ExitCode::SUCCESS;
-            }
-            println!("latest: {}  current: {}", tag, current);
-            if dry_run {
-                println!("(dry-run) would download and install {}", tag);
-            } else {
-                println!("run without --dry-run to install");
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("update check failed: {}", e);
-            ExitCode::from(1)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,6 +1215,79 @@ mod tests {
         assert_eq!(
             find_best(&db, &cfg, "xyz").as_deref(),
             Some(real.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn find_best_multi_token_and_semantics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("my-project");
+        let other = tmp.path().join("project-other");
+        std::fs::create_dir(&proj).unwrap();
+        std::fs::create_dir(&other).unwrap();
+
+        let db = Database::in_memory().unwrap();
+        db.record_visit(&proj.to_string_lossy()).unwrap();
+        db.record_visit(&other.to_string_lossy()).unwrap();
+        let cfg = Config::default();
+
+        // Both tokens match only my-project (which gets the basename bonus);
+        // the negative case (no dir contains both words) is covered
+        // deterministically in score.rs with fixed paths — tempdir suffixes
+        // contain random letters that can complete tokens.
+        let best = find_best(&db, &cfg, "my project");
+        assert_eq!(
+            best.as_deref(),
+            Some(
+                canonicalize_path(proj.to_str().unwrap())
+                    .unwrap()
+                    .as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn find_best_expands_tilde() {
+        // expand_home reads $HOME; point it at a temp dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let sub = home.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let cfg = Config::default();
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
+        let best = find_best(&db, &cfg, "~/sub");
+        match prev {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(
+            best.as_deref(),
+            Some(canonicalize_path(sub.to_str().unwrap()).unwrap().as_str())
+        );
+    }
+
+    #[test]
+    fn find_best_literal_relative_and_dotdot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let child = tmp.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+
+        let db = Database::in_memory().unwrap();
+        let cfg = Config::default();
+
+        // `hop ..` from inside child resolves to the parent.
+        let prev_cwd = std::env::current_dir().ok();
+        std::env::set_current_dir(&child).unwrap();
+        let up = find_best(&db, &cfg, "..");
+        if let Some(cwd) = prev_cwd {
+            std::env::set_current_dir(cwd).unwrap();
+        }
+        assert_eq!(
+            up.as_deref(),
+            Some(canonicalize_path(tmp.path().to_str().unwrap()).unwrap().as_str())
         );
     }
 }
